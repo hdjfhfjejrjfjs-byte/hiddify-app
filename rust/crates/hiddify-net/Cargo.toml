@@ -1,0 +1,11 @@
+[package]
+name = "hiddify-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform network rule validators (URL, CIDR, port, domain_suffix, OS process paths), IP privacy masking, and proxy tag/endpoint parsers."
+
+[dependencies]
+percent-encoding.workspace = true
+regex.workspace = true
+serde.workspace = true

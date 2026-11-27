@@ -1,19 +1,16 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:dartx/dartx.dart';
 import 'package:dio/dio.dart';
 import 'package:fpdart/fpdart.dart';
 import 'package:hiddify/core/db/db.dart';
 import 'package:hiddify/core/http_client/dio_http_client.dart';
-import 'package:hiddify/core/model/optional_range.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/profile/data/profile_data_mapper.dart';
 import 'package:hiddify/features/profile/model/download_problem.dart';
 import 'package:hiddify/features/profile/model/profile_entity.dart';
 import 'package:hiddify/features/profile/model/profile_failure.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcore/hcore.pb.dart';
 import 'package:hiddify/singbox/model/singbox_config_enum.dart';
-import 'package:hiddify/singbox/model/singbox_proxy_type.dart';
 import 'package:hiddify/utils/utils.dart';
 import 'package:meta/meta.dart';
 
@@ -251,45 +248,41 @@ class ProfileParser with InfraLogger {
 
   /// A header with one value as a string, with more as a list.
   static Map<String, dynamic> _flattenHeaders(Map<String, List<String>> headers) =>
-      headers.map((key, value) => MapEntry(key, value.length == 1 ? value.first : value));
+      hiddifyRust.require(hiddifyRust.flattenHttpHeaders(headers), 'flattenHttpHeaders');
 
   /// Replaces every subscription link line in [text] with the content it points to.
   ///
   /// Returns [text] unchanged when no line is a link.
   Future<String> expandLinks(String text, CancelToken cancelToken) async {
-    final lines = text.split('\n');
-    if (!lines.any(_isSubscriptionLink)) return text;
+    final plan = hiddifyRust.require(
+      hiddifyRust.planLinkExpansion(text, decodeBase64First: false),
+      'planLinkExpansion',
+    );
+    if (plan.targets.isEmpty) return text;
 
-    final results = List<String?>.filled(lines.length, null);
-    int index = 0;
+    final replacements = <(int, String)>[];
+    int targetCursor = 0;
 
     Future<void> worker() async {
       while (true) {
         if (cancelToken.isCancelled) return;
 
-        final currentIndex = index++;
-        if (currentIndex >= lines.length) return;
+        final pos = targetCursor++;
+        if (pos >= plan.targets.length) return;
 
-        final line = lines[currentIndex];
-        if (!_isSubscriptionLink(line)) {
-          results[currentIndex] = line;
-          continue;
-        }
-
+        final target = plan.targets[pos];
         try {
           final response = await _httpClient.get<String>(
-            line.trimRight(),
+            target.url,
             cancelToken: cancelToken,
             responseType: ResponseType.plain,
           );
-          results[currentIndex] = (response.data ?? '').trim();
+          replacements.add((target.index, response.data ?? ''));
         } catch (err) {
           if (err is DioException && CancelToken.isCancel(err)) return;
           // the full url carries the user's token, so only the host is logged
-          loggy.warning(
-            'dropped an inner subscription link that failed to download: ${Uri.tryParse(line.trimRight())?.host}',
-          );
-          results[currentIndex] = '';
+          loggy.warning('dropped an inner subscription link that failed to download: ${Uri.tryParse(target.url)?.host}');
+          replacements.add((target.index, ''));
         }
       }
     }
@@ -299,15 +292,7 @@ class ProfileParser with InfraLogger {
     if (cancelToken.isCancelled) {
       throw const ProfileFailure.cancelByUser('HTTP request for getting an inner subscription link canceled by user.');
     }
-    return results.join('\n');
-  }
-
-  /// An http(s) line is a subscription link only when its URL has a path. HTTP proxy links have none: the core reads
-  /// their options from the query.
-  static bool _isSubscriptionLink(String line) {
-    if (!line.startsWith('http://') && !line.startsWith('https://')) return false;
-    final path = Uri.tryParse(line.trimRight())?.path ?? '';
-    return path.isNotEmpty && path != '/';
+    return hiddifyRust.require(hiddifyRust.mergeExpandedLinks(plan.decodedText, replacements), 'mergeExpandedLinks');
   }
 
   /// Expands the links in the temp file and writes the file once, only if the text changed.
@@ -323,46 +308,10 @@ class ProfileParser with InfraLogger {
   static Either<ProfileFailure, Map<String, dynamic>> populateHeaders({
     required String content,
     Map<String, dynamic>? remoteHeaders,
-  }) => Either.tryCatch(() {
-    final contentHeaders = _parseHeadersFromContent(content);
-    return _mergeAndValidateHeaders(contentHeaders, remoteHeaders ?? {});
-  }, ProfileFailure.unexpected);
-
-  static Map<String, dynamic> _mergeAndValidateHeaders(
-    Map<String, dynamic> contentHeaders,
-    Map<String, dynamic> remoteHeaders,
-  ) {
-    for (final entry in contentHeaders.entries) {
-      if (!remoteHeaders.keys.contains(entry.key)) {
-        remoteHeaders[entry.key] = entry.value;
-      }
-    }
-    final headers = <String, dynamic>{};
-    for (final entry in remoteHeaders.entries) {
-      if (allowedProfileHeaders.contains(entry.key) && entry.value != null && entry.value.toString().isNotEmpty) {
-        headers[entry.key] = entry.value;
-      }
-    }
-    return headers;
-  }
-
-  static Map<String, dynamic> _parseHeadersFromContent(String content) {
-    final headers = <String, dynamic>{};
-    final content_ = safeDecodeBase64(content);
-    final lines = content_.split("\n");
-    final linesToProcess = lines.length < 10 ? lines.length : 10;
-    for (int i = 0; i < linesToProcess; i++) {
-      final line = lines[i];
-      if (line.startsWith("#") || line.startsWith("//")) {
-        final index = line.indexOf(':');
-        if (index == -1) continue;
-        final key = line.substring(0, index).replaceFirst(RegExp("^#|//"), "").trim().toLowerCase();
-        final value = line.substring(index + 1).trim();
-        headers[key] = value;
-      }
-    }
-    return headers;
-  }
+  }) => Either.tryCatch(
+    () => hiddifyRust.require(hiddifyRust.populateHeaders(content, remoteHeaders), 'populateHeaders'),
+    ProfileFailure.unexpected,
+  );
 
   /// Parse a `subscription-userinfo` header, e.g.
   /// `upload=0; download=1024; total=10240; expire=1704054600`.
@@ -374,28 +323,15 @@ class ProfileParser with InfraLogger {
   /// `0` or unreadable `total`/`expire` is treated as "unlimited", and so is an
   /// `expire` past [infiniteTimeThreshold].
   static SubscriptionInfo? _parseSubscriptionInfo(String subInfoStr) {
-    final map = <String, int?>{};
-    for (final segment in subInfoStr.split(';')) {
-      final parts = segment.split('=');
-      if (parts.length < 2) continue;
-      final key = parts.first.trim();
-      if (key.isEmpty) continue;
-      // NaN, infinity and negatives count as unreadable: toInt() throws on the first two.
-      final value = num.tryParse(parts[1].trim());
-      map[key] = (value == null || !value.isFinite || value < 0) ? null : value.toInt();
-    }
-    if (map case {"upload": final upload?, "download": final download?, "total": final total, "expire": var expire}) {
-      final total1 = (total == null || total == 0) ? infiniteTrafficThreshold + 1 : total;
-      // An expiry past the threshold is no expiry; it may also be beyond what DateTime holds.
-      expire = (expire == null || expire == 0 || expire > infiniteTimeThreshold) ? infiniteTimeThreshold : expire;
-      return SubscriptionInfo(
-        upload: upload,
-        download: download,
-        total: total1,
-        expire: DateTime.fromMillisecondsSinceEpoch(expire * 1000),
-      );
-    }
-    return null;
+    hiddifyRust.ensureAvailable('parseSubscriptionInfo');
+    final parsed = hiddifyRust.parseSubscriptionInfo(subInfoStr);
+    if (parsed == null) return null;
+    return SubscriptionInfo(
+      upload: parsed.upload,
+      download: parsed.download,
+      total: parsed.total,
+      expire: DateTime.fromMillisecondsSinceEpoch(parsed.expireSecs * 1000),
+    );
   }
 
   /// Extract a filename from a `content-disposition` header.
@@ -405,24 +341,8 @@ class ProfileParser with InfraLogger {
   /// and falls back to the plain quoted form `filename="name.txt"`. Returns ''
   /// when neither is present or the extended value can't be decoded.
   @visibleForTesting
-  static String filenameFromContentDisposition(String header) {
-    // filename*=charset'lang'<percent-encoded-value>; charset'lang' is optional here to
-    // also accept servers that omit it (filename*=%D9%BE...).
-    if (RegExp(r"filename\*\s*=\s*(?:[^']*'[^']*')?([^;]+)", caseSensitive: false).firstMatch(header) case final m?) {
-      final raw = m.group(1)?.trim() ?? '';
-      if (raw.isNotEmpty) {
-        try {
-          return Uri.decodeComponent(raw);
-        } catch (_) {
-          // Malformed percent-encoding → fall back to the quoted form below.
-        }
-      }
-    }
-    if (RegExp('filename="([^"]*)"').firstMatch(header) case final m?) {
-      return m.group(1) ?? '';
-    }
-    return '';
-  }
+  static String filenameFromContentDisposition(String header) =>
+      hiddifyRust.require(hiddifyRust.filenameFromContentDisposition(header), 'filenameFromContentDisposition');
 
   /// Decode the value of a `profile-title: base64:<value>` header.
   ///
@@ -430,70 +350,36 @@ class ProfileParser with InfraLogger {
   /// when it is not valid base64 or not UTF-8, so the name falls through to the
   /// next source instead of failing the whole profile parse.
   @visibleForTesting
-  static String decodeBase64Title(String value) {
-    try {
-      return utf8.decode(base64.decode(base64.normalize(value.trim()))).trim();
-    } on FormatException {
-      return '';
-    }
-  }
+  static String decodeBase64Title(String value) =>
+      hiddifyRust.require(hiddifyRust.decodeBase64Title(value), 'decodeBase64Title');
 
   @visibleForTesting
   static Either<ProfileFailure, ProfileEntity> parse({required String tempFilePath, required ProfileEntity profile}) =>
       Either.tryCatch(() {
         final headers = Map<String, dynamic>.from(profile.populatedHeaders ?? {});
-        var name = '';
-        if (profile.userOverride?.name case final String oName when oName.isNotBlank) {
-          name = oName;
-        }
+        final name = hiddifyRust.require(
+          hiddifyRust.resolveProfileName(
+            overrideName: profile.userOverride?.name,
+            profileTitleHeader: headers['profile-title'] is String ? headers['profile-title'] as String : null,
+            contentDispositionHeader: headers['content-disposition'] is String
+                ? headers['content-disposition'] as String
+                : null,
+            remoteUrl: profile is RemoteProfileEntity ? profile.url : null,
+            existingLocalName: profile is LocalProfileEntity ? profile.name : null,
+            tempFilePath: tempFilePath,
+          ),
+          'resolveProfileName',
+        );
 
-        if (headers['profile-title'] case final String titleHeader when name.isBlank) {
-          if (titleHeader.startsWith("base64:")) {
-            name = decodeBase64Title(titleHeader.replaceFirst("base64:", ""));
-          } else {
-            name = titleHeader.trim();
-          }
-        }
-        if (headers['content-disposition'] case final String contentDispositionHeader when name.isBlank) {
-          name = filenameFromContentDisposition(contentDispositionHeader);
-        }
-        if (profile case RemoteProfileEntity(:final url)) {
-          if (Uri.parse(url).fragment case final fragment when name.isBlank) {
-            name = fragment;
-          }
-          if (url.split("/").lastOrNull case final part? when name.isBlank) {
-            final pattern = RegExp(r"\.(json|yaml|yml|txt)[\s\S]*");
-            name = part.replaceFirst(pattern, "");
-          }
-        }
-        if (name.isBlank) {
-          switch (profile) {
-            case RemoteProfileEntity():
-              name = "Remote Profile";
-
-            case LocalProfileEntity():
-              // The editor saves generated JSON, so the original link fragment
-              // is no longer available. Keep the profile name independently of
-              // outbound tags unless an override or header supplies a new name.
-              name = profile.name.isNotBlank ? profile.name : protocol(File(tempFilePath).readAsStringSync());
-          }
-        }
-
-        final isAutoUpdateDisable = profile.userOverride?.isAutoUpdateDisable ?? false;
-        ProfileOptions? options;
-        if (profile.userOverride?.updateInterval case final int updateInterval
-            when updateInterval > 0 && !isAutoUpdateDisable) {
-          options = ProfileOptions(updateInterval: Duration(hours: updateInterval));
-        }
-        if (headers['profile-update-interval'] case final String updateIntervalStr
-            when options == null && !isAutoUpdateDisable) {
-          // Convention: a positive integer number of hours. Ignore anything else
-          // (a decimal, garbage, or <= 0) instead of failing the whole parse. At most a year: a
-          // larger number overflowed the Duration into a wrong, even negative, interval.
-          if (int.tryParse(updateIntervalStr.trim()) case final hours? when hours > 0) {
-            options = ProfileOptions(updateInterval: Duration(hours: hours.clamp(1, maxUpdateIntervalHours)));
-          }
-        }
+        hiddifyRust.ensureAvailable('parseUpdateIntervalHours');
+        final intervalHours = hiddifyRust.parseUpdateIntervalHours(
+          headerValue: headers['profile-update-interval'] is String
+              ? headers['profile-update-interval'] as String
+              : null,
+          overrideHours: profile.userOverride?.updateInterval,
+          isAutoUpdateDisable: profile.userOverride?.isAutoUpdateDisable ?? false,
+        );
+        final options = intervalHours == null ? null : ProfileOptions(updateInterval: Duration(hours: intervalHours));
 
         SubscriptionInfo? subInfo;
         if (headers['subscription-userinfo'] case final String subInfoStr) {
@@ -524,53 +410,7 @@ class ProfileParser with InfraLogger {
         );
       }, ProfileFailure.unexpected);
 
-  static String protocol(String content) {
-    if (content.contains("[Interface]")) {
-      return ProxyType.wireguard.label;
-    }
-    // a .ovpn file: its certificate inline, and the server it connects to
-    if (content.contains('<ca>') && RegExp(r'^\s*remote\s', multiLine: true).hasMatch(content)) {
-      return 'OpenVPN';
-    }
-    final lines = content.split('\n');
-    String? name;
-    for (final line in lines) {
-      final uri = Uri.tryParse(line);
-      if (uri == null) continue;
-      final fragment = uri.hasFragment ? Uri.decodeComponent(uri.fragment.split(" -> ")[0]) : null;
-      name ??= switch (uri.scheme) {
-        'ss' => fragment ?? ProxyType.shadowsocks.label,
-        'ssconf' => fragment ?? ProxyType.shadowsocks.label,
-        'vmess' => ProxyType.vmess.label,
-        'vless' => fragment ?? ProxyType.vless.label,
-        'trojan' => fragment ?? ProxyType.trojan.label,
-        'tuic' => fragment ?? ProxyType.tuic.label,
-        'hy2' || 'hysteria2' => fragment ?? ProxyType.hysteria2.label,
-        'hy' || 'hysteria' => fragment ?? ProxyType.hysteria.label,
-        'ssh' => fragment ?? ProxyType.ssh.label,
-        'wg' => fragment ?? ProxyType.wireguard.label,
-        'awg' => fragment ?? ProxyType.awg.label,
-        'shadowtls' => fragment ?? ProxyType.shadowtls.label,
-        'mieru' => fragment ?? ProxyType.mieru.label,
-        'warp' => fragment ?? ProxyType.warp.label,
-        'ovpn' => fragment ?? 'OpenVPN',
-        // any other link (psiphon://, anytls://, naive+https://, ...): its name, else its scheme
-        final scheme when scheme.isNotEmpty && line.trimLeft().startsWith('$scheme://') =>
-          fragment ?? _schemeLabel(scheme),
-        _ => null,
-      };
-    }
-    return name ?? ProxyType.unknown.label;
-  }
-
-  /// Display label for a link scheme: the matching [ProxyType] label (naive+https -> Naive),
-  /// otherwise the capitalized scheme (psiphon -> Psiphon).
-  static String _schemeLabel(String scheme) {
-    final base = scheme.split('+').first;
-    final type = ProxyType.fromJson(base);
-    if (type != ProxyType.unknown) return type.label;
-    return base[0].toUpperCase() + base.substring(1);
-  }
+  static String protocol(String content) => hiddifyRust.require(hiddifyRust.detectProtocol(content), 'detectProtocol');
 
   static String profileOverrideHelper({required ProfileEntriesCompanion profile}) {
     return ProfileParser.profileOverride(
@@ -587,13 +427,10 @@ class ProfileParser with InfraLogger {
   @visibleForTesting
   static ChainMode? extraSecurityMode(String? value) {
     if (value == null) return null;
-    final trimmed = value.trim();
-    for (final mode in ChainMode.values) {
-      if (mode.isProfile()) continue;
-      // a subscription calls it "warp"; the core's key for it is "warp_auto"
-      if (mode.key == trimmed || (mode.isWarp() && trimmed == 'warp')) return mode;
-    }
-    return null;
+    hiddifyRust.ensureAvailable('extraSecurityMode');
+    final key = hiddifyRust.extraSecurityMode(value);
+    if (key == null) return null;
+    return ChainMode.values.where((m) => m.key == key).firstOrNull;
   }
 
   /// How many proxies run, the fastest, when neither the user nor the subscription says.
@@ -602,9 +439,9 @@ class ProfileParser with InfraLogger {
   /// A `keep-top` header: how many proxies to keep running, or -1 for all. Anything else is no
   /// header at all.
   static int? keepTopHeader(String? value) {
-    final keepTop = int.tryParse(value?.trim() ?? '');
-    if (keepTop == null || (keepTop < 1 && keepTop != -1)) return null;
-    return keepTop;
+    if (value == null) return null;
+    hiddifyRust.ensureAvailable('keepTopHeader');
+    return hiddifyRust.keepTopHeader(value);
   }
 
   /// Build the `tls-tricks` map from a subscription `fragment` header.
@@ -617,98 +454,30 @@ class ProfileParser with InfraLogger {
   @visibleForTesting
   static Map<String, dynamic>? fragmentTricks(String? value) {
     if (value == null) return null;
-    final parts = value.split(',').map((e) => e.trim()).toList();
-    if (parts.length < 3) return null;
-    final leadingMethod = parts.first.toLowerCase() == 'tlshello';
-    final size = leadingMethod ? parts[1] : parts[0];
-    final sleep = leadingMethod ? parts[2] : parts[1];
-    if (OptionalRange.tryParse(size) == null || OptionalRange.tryParse(sleep) == null) return null;
-    return {'enable-fragment': true, 'fragment-size': size, 'fragment-sleep': sleep};
+    hiddifyRust.ensureAvailable('fragmentTricks');
+    return hiddifyRust.fragmentTricks(value);
   }
 
   static String profileOverride({
     required Map<String, dynamic>? populatedHeaders,
     required UserOverride? userOverride,
   }) {
-    final headers = Map<String, dynamic>.from(populatedHeaders ?? {});
-
-    // Consume the raw subscription inputs; the output config uses structured
-    // keys, so these string values must not leak through unchanged.
-    final fragmentInput = headers.remove('fragment')?.toString();
-    final extraSecurityInput = headers.remove('extra-security')?.toString();
-    final keepTopInput = headers.remove('keep-top')?.toString();
-    // the user's choices only, never a subscription's
-    headers.remove('keep-top-quick');
-    headers.remove('keep-top-countries');
-    headers.remove('keep-top-pinned');
-
-    // extra-security: exactly one documented mode. The app's own setting takes
-    // precedence over the subscription; an unrecognised value is ignored.
-    final mode = extraSecurityMode(userOverride?.extraSecurity) ?? extraSecurityMode(extraSecurityInput);
-    if (mode != null) {
-      headers['chain-status'] = ChainStatus.extraSecurity.key;
-      headers['extra-security'] = {'mode': mode.key};
-    }
-
-    // fragment: the app's own setting wins and enables fragmentation with the
-    // user's configured size/sleep. Otherwise the subscription header is read
-    // exactly like a proxy link's `fragment` parameter — a complete triplet or
-    // nothing at all.
-    if (userOverride?.enableFragment == true) {
-      headers['tls-tricks'] = {'enable-fragment': true};
-    } else if (fragmentTricks(fragmentInput) case final tricks?) {
-      headers['tls-tricks'] = tricks;
-    }
-
-    // keep-top: the user's choice, else the subscription's, else the fastest few; -1 runs every proxy
-    headers['keep-top'] = userOverride?.keepTop ?? keepTopHeader(keepTopInput) ?? keepTopDefault;
-    // keep-top-quick: picks the fastest without testing every proxy, unless the user turned it off
-    if (userOverride?.keepTopQuick ?? true) {
-      headers['keep-top-quick'] = true;
-    }
-    // keep-top-countries: only proxies of these countries are kept
-    if (userOverride?.keepTopCountries case final countries? when countries.isNotEmpty) {
-      headers['keep-top-countries'] = countries;
-    }
-    // keep-top-pinned: the proxies the user keeps loaded, beside the fastest
-    if (userOverride?.keepTopPinned case final pinned? when pinned.isNotEmpty) {
-      headers['keep-top-pinned'] = pinned;
-    }
-    // keep-tags: the proxies the user chose run, and only them, while any is still in the profile
-    if (userOverride?.keepTags case final tags? when tags.isNotEmpty) {
-      headers['keep-tags'] = tags;
-    }
-
-    headers.removeWhere(
-      (key, value) => !allowedOverrideConfigs.contains(key) || value == null || value.toString().isEmpty,
-    );
-
-    final profileOverrideStr = jsonEncode({for (final key in headers.keys) key: headers[key]});
-    return profileOverrideStr;
+    final uoMap = userOverride == null
+        ? null
+        : <String, dynamic>{
+            if (userOverride.enableFragment != null) 'enableFragment': userOverride.enableFragment,
+            if (userOverride.extraSecurity != null) 'extraSecurity': userOverride.extraSecurity,
+            if (userOverride.keepTop != null) 'keepTop': userOverride.keepTop,
+            if (userOverride.keepTopQuick != null) 'keepTopQuick': userOverride.keepTopQuick,
+            if (userOverride.keepTopCountries != null) 'keepTopCountries': userOverride.keepTopCountries,
+            if (userOverride.keepTopPinned != null) 'keepTopPinned': userOverride.keepTopPinned,
+            if (userOverride.keepTags != null) 'keepTags': userOverride.keepTags,
+          };
+    return hiddifyRust.require(hiddifyRust.profileOverride(populatedHeaders, uoMap), 'profileOverride');
   }
 
   static Map<String, dynamic> applyProfileOverride(Map<String, dynamic> main, String? profileOverride) {
-    if (profileOverride == null) return main;
-    if (profileOverride.contains("{")) {
-      final profileOverrideMap = jsonDecode(profileOverride) as Map<String, dynamic>;
-      return _mergeJson(main, profileOverrideMap);
-    } else {
-      return main;
-    }
-  }
-
-  static Map<String, dynamic> _mergeJson(Map<String, dynamic> main, Map<String, dynamic> override) {
-    override.forEach((key, value) {
-      if (main.containsKey(key)) {
-        if (main[key] is Map<String, dynamic> && value is Map<String, dynamic>) {
-          main[key] = _mergeJson(main[key] as Map<String, dynamic>, value);
-        } else {
-          main[key] = value;
-        }
-      } else {
-        main[key] = value;
-      }
-    });
-    return main;
+    if (profileOverride == null || !profileOverride.contains("{")) return main;
+    return hiddifyRust.require(hiddifyRust.applyProfileOverride(main, profileOverride), 'applyProfileOverride');
   }
 }

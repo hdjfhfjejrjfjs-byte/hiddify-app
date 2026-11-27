@@ -6,6 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:gap/gap.dart';
 import 'package:hiddify/core/localization/translations.dart';
 import 'package:hiddify/core/router/dialog/dialog_notifier.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/connection/model/connection_status.dart';
 import 'package:hiddify/features/connection/notifier/connection_notifier.dart';
 import 'package:hiddify/features/profile/model/profile_entity.dart';
@@ -52,48 +53,16 @@ const _countryGroup = '+';
 const _otherCountries = '*';
 
 /// The protocol a sing-box [type] is, as the core names it on the proxy page.
-String protocolName(String type) => switch (type) {
-  'shadowsocks' => 'Shadowsocks',
-  'shadowsocksr' => 'ShadowsocksR',
-  'vless' => 'VLESS',
-  'vmess' => 'VMess',
-  'trojan' => 'Trojan',
-  'naive' => 'Naive',
-  'wireguard' => 'WireGuard',
-  'hysteria' => 'Hysteria',
-  'hysteria2' => 'Hysteria2',
-  'tuic' => 'TUIC',
-  'anytls' => 'AnyTLS',
-  'shadowtls' => 'ShadowTLS',
-  'ssh' => 'SSH',
-  'tor' => 'Tor',
-  'socks' => 'SOCKS',
-  'http' => 'HTTP',
-  'warp' => 'WARP',
-  'masque' => 'MASQUE',
-  'psiphon' => 'Psiphon',
-  'mieru' => 'Mieru',
-  'awg' => 'Awg',
-  'dnstt' => 'DNSTT',
-  'xray' => 'xray',
-  '' => '?',
-  _ => type[0].toUpperCase() + type.substring(1),
-};
+String protocolName(String type) => hiddifyRust.require(hiddifyRust.protocolName(type), 'protocolName');
 
 /// The country of a proxy's [tag] by the flag in it: its two letters, or null without a flag.
 String? countryOf(String tag) {
-  bool regional(int rune) => rune >= 0x1F1E6 && rune <= 0x1F1FF;
-  final runes = tag.runes.toList();
-  for (var i = 0; i + 1 < runes.length; i++) {
-    if (regional(runes[i]) && regional(runes[i + 1])) {
-      return String.fromCharCodes([runes[i] - 0x1F1E6 + 0x41, runes[i + 1] - 0x1F1E6 + 0x41]);
-    }
-  }
-  return null;
+  hiddifyRust.ensureAvailable('countryOf');
+  return hiddifyRust.countryOf(tag);
 }
 
 /// The flag of a two-letter country [code].
-String flagOf(String code) => String.fromCharCodes(code.codeUnits.map((c) => c - 0x41 + 0x1F1E6));
+String flagOf(String code) => hiddifyRust.require(hiddifyRust.flagOf(code), 'flagOf');
 
 /// Which of [profile]'s [proxies] run, chosen on a list like the proxy page's: their ping and
 /// speeds, sorted and filtered by country, protocol and status, and tested one, the chosen, the
@@ -190,7 +159,11 @@ class KeepTagsDialog extends HookConsumerWidget {
     // a paused proxy, as the core would show it: its tag without the core's mark, its protocol
     OutboundInfo info(String tag) =>
         live[tag] ??
-        OutboundInfo(tag: tag, tagDisplay: tag.replaceFirst(RegExp('§.*'), '').trimRight(), type: protocols[tag]);
+        OutboundInfo(
+          tag: tag,
+          tagDisplay: hiddifyRust.require(hiddifyRust.sanitizeTag(tag), 'sanitizeTag'),
+          type: protocols[tag],
+        );
     bool validDelay(int delay) => delay > 0 && delay < 65000;
     // the ping known of a proxy: of this run, else, for one not tested in it, the one the core kept
     // from the run before; 0 when it failed or was never tested

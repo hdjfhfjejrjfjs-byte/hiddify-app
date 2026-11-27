@@ -1,0 +1,20 @@
+[package]
+name = "hiddify-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Crash excerpt extraction, Telegram <=64-byte base64url diagnostic link encoder, OS distro detection, release changelog parser, and bounded log ring."
+
+[dependencies]
+age.workspace = true
+base64.workspace = true
+hiddify-config = { path = "../hiddify-config" }
+indexmap.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"

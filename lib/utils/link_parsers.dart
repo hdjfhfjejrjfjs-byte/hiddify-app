@@ -1,57 +1,29 @@
-import 'dart:convert';
-
-import 'package:hiddify/utils/validators.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 
 typedef ProfileLink = ({String url, String name});
 
 // TODO: test and improve
 abstract class LinkParser {
-  static String generateSubShareLink(String url, [String? name]) {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return '';
-    // replace keeps port and userinfo, which the Uri constructor drops
-    return uri.replace(fragment: name).toString();
-  }
+  static String generateSubShareLink(String url, [String? name]) =>
+      hiddifyRust.require(hiddifyRust.generateSubShareLink(url, name), 'generateSubShareLink');
 
   // protocols schemas
   static const protocols = ['hiddify', 'v2ray', 'v2rayn', 'v2rayng', 'clash', 'clashmeta', 'sing-box'];
 
   static ProfileLink? parse(String link) {
-    return simple(link) ?? deep(link);
+    hiddifyRust.ensureAvailable('parseLink');
+    return hiddifyRust.parseLink(link);
   }
 
   static ProfileLink? simple(String link) {
-    if (!isUrl(link)) return null;
-    final uri = Uri.parse(link.trim());
-    return (url: uri.toString(), name: uri.queryParameters['name'] ?? '');
+    hiddifyRust.ensureAvailable('parseSimpleLink');
+    return hiddifyRust.parseSimpleLink(link);
   }
 
   static ProfileLink? deep(String link) {
-    final uri = Uri.tryParse(link.trim());
-    if (uri == null || !uri.hasScheme || !uri.hasAuthority) return null;
-    final queryParams = uri.queryParameters;
-    switch (uri.scheme) {
-      case 'hiddify':
-        if (queryParams.containsKey('url')) {
-          // Doc form: hiddify://install-config?url=<uri>#<name> — the name lives
-          // in the fragment. Prefer an explicit `name=` param, else the fragment.
-          final name = (queryParams['name']?.isNotEmpty ?? false) ? queryParams['name']! : uri.fragment;
-          return (url: queryParams['url']!, name: name);
-        } else {
-          return (url: uri.path.substring(1) + (uri.hasQuery ? "?${uri.query}" : ""), name: uri.fragment);
-        }
-      case 'v2ray' || 'v2rayn' || 'v2rayng' || 'clash' || 'clashmeta' || 'sing-box':
-        return queryParams.containsKey('url') ? (url: queryParams['url']!, name: queryParams['name'] ?? '') : null;
-      default:
-        return null;
-    }
+    hiddifyRust.ensureAvailable('parseDeepLink');
+    return hiddifyRust.parseDeepLink(link);
   }
 }
 
-String safeDecodeBase64(String str) {
-  try {
-    return utf8.decode(base64Decode(str));
-  } catch (e) {
-    return str;
-  }
-}
+String safeDecodeBase64(String str) => hiddifyRust.require(hiddifyRust.safeDecodeBase64(str), 'safeDecodeBase64');

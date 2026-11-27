@@ -39,10 +39,13 @@ else
 endif
 
 
-BINDIR=hiddify-core$(SEP)bin
+CORE_DIR ?= hiddify-core
+CORE_REPO_URL ?= $(shell git config -f .gitmodules submodule.hiddify-core.url 2>/dev/null || echo https://github.com/hdjfhfjejrjfjs-byte/hiddify-core.git)
+CORE_BRANCH ?= $(shell git config -f .gitmodules submodule.hiddify-core.branch 2>/dev/null || echo main)
+BINDIR=$(CORE_DIR)$(SEP)bin
 ANDROID_OUT=android$(SEP)app$(SEP)libs
 IOS_OUT=ios$(SEP)Frameworks
-DESKTOP_OUT=hiddify-core$(SEP)bin
+DESKTOP_OUT=$(CORE_DIR)$(SEP)bin
 GEO_ASSETS_DIR=assets$(SEP)core
 
 CORE_PRODUCT_NAME=hiddify-core
@@ -118,32 +121,36 @@ android-prepare:common-prepare android-libs
 android-apk-prepare:android-prepare
 android-aab-prepare:android-prepare
 
+.PHONY: ensure-core-submodule
+ensure-core-submodule:
+	@if [ ! -f "$(CORE_DIR)/Makefile" ] || [ ! -f "$(CORE_DIR)/cmd/launcher/Cargo.toml" ]; then \
+		echo "==> Initializing $(CORE_DIR) from remote $(CORE_REPO_URL) ($(CORE_BRANCH))..."; \
+		rm -rf "$(CORE_DIR)"; \
+		git clone --recurse-submodules -b "$(CORE_BRANCH)" \
+			-c url."https://github.com/".insteadOf="git@github.com:" \
+			-c url."https://github.com/".insteadOf="ssh://git@github.com/" \
+			"$(CORE_REPO_URL)" "$(CORE_DIR)"; \
+	elif [ ! -f "$(CORE_DIR)/hiddify-sing-box/go.mod" ] || [ ! -f "$(CORE_DIR)/ray2sing/go.mod" ]; then \
+		git -C "$(CORE_DIR)" \
+			-c url."https://github.com/".insteadOf="git@github.com:" \
+			-c url."https://github.com/".insteadOf="ssh://git@github.com/" \
+			submodule update --init --recursive; \
+	fi
+
 .PHONY: generate_kotlin_protos
-generate_kotlin_protos: 
-	# Run protoc to generate Kotlin files
-	# protoc \
-	# 	--proto_path=hiddify-core/ \
-	# 	--java_out=./android/app/src/main/java/ \
-	# 	--grpc-java_out=./android/app/src/main/java/ \
-	# 	$(shell find hiddify-core/v2 hiddify-core/extension -name "*.proto")
+generate_kotlin_protos: ensure-core-submodule
 	rsync -av --delete \
 		--include='*/' \
 		--include='*.proto' \
 		--exclude='*' \
-		hiddify-core/v2 hiddify-core/extension ./android/app/src/main/protos/
-	# # Find .proto files and update package declarations
-	# find "./android/app/src/main/java/com/hiddify/hiddify/protos" -type f -name "*.java" | while read -r proto_file; do \
-	#     if grep -q "^package " "$$proto_file"; then \
-	#         $(SED) 's/^package \([\w\.]*\)/package com.hiddify.hiddify.protos.\1/g' "$$proto_file"; \
-	#     fi \
-	# done
+		$(CORE_DIR)/v2 ./android/app/src/main/protos/
 
-generate_go_protoc:
-	make -C hiddify-core -f Makefile protos
+generate_go_protoc: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile protos
 	echo "SED: $(SED)"
-generate_dart_protoc:
+generate_dart_protoc: ensure-core-submodule
 	mkdir -p lib/hiddifycore/generated
-	protoc --dart_out=grpc:lib/hiddifycore/generated --proto_path=hiddify-core/  $(shell find hiddify-core/v2 hiddify-core/extension -name "*.proto") 	google/protobuf/timestamp.proto ; \
+	protoc --dart_out=grpc:lib/hiddifycore/generated --proto_path=$(CORE_DIR)/ $(shell find $(CORE_DIR)/v2 -name "*.proto" 2>/dev/null) google/protobuf/timestamp.proto ; \
 
 .PHONY: protos
 protos: generate_go_protoc generate_kotlin_protos generate_dart_protoc
@@ -520,54 +527,38 @@ linux-arm64-musl-libs:
 	curl -fL --retry 5 --retry-delay 5 --retry-all-errors $(CORE_URL)/$(CORE_NAME)-linux-arm64-musl.tar.gz | tar xz -C $(DESKTOP_OUT)/
 
 
-macos-libs:
-	mkdir -p $(DESKTOP_OUT) macos/Frameworks
-	curl -fL --retry 5 --retry-delay 5 --retry-all-errors $(CORE_URL)/$(CORE_NAME)-macos.tar.gz | tar xz -C $(DESKTOP_OUT)
-	# Tunnel bind ships in the same tarball (built by hiddify-core `make macos`).
-	test -d $(DESKTOP_OUT)/HiddifyTunnelCore.xcframework
-	rm -rf macos/Frameworks/HiddifyTunnelCore.xcframework
-	mv $(DESKTOP_OUT)/HiddifyTunnelCore.xcframework macos/Frameworks/
-	touch macos/Frameworks/HiddifyTunnelCore.xcframework/.downloaded
-	# The core helper (macos/scripts/embed-core-helper.sh) is built from the shared C launcher. CI
-	# does not check out the submodule, so take that file from the commit the app pins.
-	test -f hiddify-core/cmd/launcher/main.c || { \
-		mkdir -p hiddify-core/cmd/launcher && \
-		curl -fL --retry 5 --retry-delay 5 --retry-all-errors -o hiddify-core/cmd/launcher/main.c \
-			https://raw.githubusercontent.com/hiddify/hiddify-core/$$(git rev-parse HEAD:hiddify-core)/cmd/launcher/main.c; }
+macos-libs: build-macos-libs
 
-ios-libs: #not tested
-	mkdir -p $(IOS_OUT)
-	rm -rf $(IOS_OUT)/HiddifyCore.xcframework
-	curl -fL --retry 5 --retry-delay 5 --retry-all-errors $(CORE_URL)/$(CORE_NAME)-ios.tar.gz | tar xz -C "$(IOS_OUT)"
+ios-libs: build-ios-libs
 
 get-geo-assets:
 	echo ""
 	# curl -L https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db -o $(GEO_ASSETS_DIR)/geoip.db
 	# curl -L https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db -o $(GEO_ASSETS_DIR)/geosite.db
 
-build-headers:
-	make -C hiddify-core -f Makefile headers && mv $(BINDIR)/$(CORE_NAME)-headers.h $(BINDIR)/hiddify-core.h
+build-headers: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile headers && mv $(BINDIR)/$(CORE_NAME)-headers.h $(BINDIR)/hiddify-core.h
 
-build-android-libs:
-	make -C hiddify-core -f Makefile android 
-	mv $(BINDIR)/$(LIB_NAME).aar $(ANDROID_OUT)/
+build-android-libs: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile android 
+	cp -f $(BINDIR)/$(LIB_NAME).aar $(ANDROID_OUT)/
 
-build-windows-libs:
-	make -C hiddify-core -f Makefile windows-amd64
+build-windows-libs: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile windows-amd64
 
-build-linux-libs:
-	make -C hiddify-core -f Makefile linux-amd64 
+build-linux-libs: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile linux-amd64 
 
-build-macos-libs:
-	make -C hiddify-core -f Makefile macos
-	test -d hiddify-core/bin/HiddifyTunnelCore.xcframework
+build-macos-libs: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile macos
+	test -d $(BINDIR)/HiddifyTunnelCore.xcframework
 	mkdir -p macos/Frameworks
 	rm -rf macos/Frameworks/HiddifyTunnelCore.xcframework
-	cp -R hiddify-core/bin/HiddifyTunnelCore.xcframework macos/Frameworks/
+	cp -R $(BINDIR)/HiddifyTunnelCore.xcframework macos/Frameworks/
 
 # Native arch only (no lipo, no HiddifyTunnelCore.xcframework).
-build-lite-macos-libs:
-	make -C hiddify-core -f Makefile macos-lite
+build-lite-macos-libs: ensure-core-submodule
+	make -C $(CORE_DIR) -f Makefile macos-lite
 
 # Runs Debug from /Applications, where macOS allows the VPN system extension.
 macos-run-dev:
@@ -592,10 +583,29 @@ macos-appstore-prepare: macos-prepare
 macos-appstore-release:
 	bash macos/scripts/dist.sh app-store $(MACOS_APPSTORE_ARGS)
 
-build-ios-libs: 
+build-ios-libs: ensure-core-submodule
+	mkdir -p $(IOS_OUT)
 	rm -rf $(IOS_OUT)/HiddifyCore.xcframework 
-	make -C hiddify-core -f Makefile ios  
-	mv $(BINDIR)/HiddifyCore.xcframework $(IOS_OUT)/HiddifyCore.xcframework
+	make -C $(CORE_DIR) -f Makefile ios  
+	cp -R $(BINDIR)/HiddifyCore.xcframework $(IOS_OUT)/HiddifyCore.xcframework
+
+rust-test:
+	./scripts/build_rust.sh test
+
+rust-host:
+	./scripts/build_rust.sh host
+
+rust-ios:
+	./scripts/build_rust.sh ios
+
+rust-macos:
+	./scripts/build_rust.sh macos
+
+rust-android:
+	./scripts/build_rust.sh android
+
+rust-linux:
+	./scripts/build_rust.sh linux
 
 release: # Create a new tag for release.
 	@CORE_VERSION=$(core.version) bash -c ".github/change_version.sh "

@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 
 import 'package:hiddify/core/model/constants.dart';
 import 'package:hiddify/core/router/dialog/dialog_notifier.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/connection/notifier/connection_notifier.dart';
 import 'package:hiddify/features/profile/data/profile_data_providers.dart';
 import 'package:hiddify/features/profile/data/profile_parser.dart';
@@ -39,30 +39,14 @@ const preferredCountries = ['DE', 'GB', 'FR', 'US', 'CA', 'NL', 'TR'];
 const keepTopAnswering = -2;
 
 /// The proxies of a profile's config, as the core counts them for keep top (UserProxyTags).
-int countProxies(String config) => profileProxies(config).length;
+int countProxies(String config) => hiddifyRust.require(hiddifyRust.countProxies(config), 'countProxies');
 
 /// A proxy of a profile: its tag, and its sing-box type (`vless`, `shadowsocks`, ...).
 typedef ProfileProxy = ({String tag, String type});
 
 /// The proxies of a profile's config, as the core lists them (UserProxyTags), in the config's order.
-List<ProfileProxy> profileProxies(String config) {
-  final json = jsonDecode(config);
-  if (json is! Map) return const [];
-  final proxies = <ProfileProxy>[];
-  for (final key in const ['outbounds', 'endpoints']) {
-    for (final out in json[key] as List? ?? const []) {
-      if (out is! Map) continue;
-      final tag = out['tag'] as String? ?? '';
-      final type = out['type'] as String? ?? '';
-      if (_notProxies.contains(type) || _builtInTags.contains(tag) || tag.contains('§hide§')) continue;
-      proxies.add((tag: tag, type: type));
-    }
-  }
-  return proxies;
-}
-
-const _notProxies = {'block', 'selector', 'urltest', 'custom', 'dns'};
-const _builtInTags = {'direct', 'bypass', 'block', 'select', 'lowest'};
+List<ProfileProxy> profileProxies(String config) =>
+    hiddifyRust.require(hiddifyRust.profileProxies(config), 'profileProxies');
 
 /// How many proxies the profile has; 0 when its config can not be read.
 @riverpod

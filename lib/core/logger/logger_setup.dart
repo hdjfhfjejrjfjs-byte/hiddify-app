@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart' show debugPrint, kReleaseMode;
 import 'package:hiddify/core/logger/log_level_compat.dart';
 import 'package:hiddify/core/logger/ring/log_ring.dart';
 import 'package:hiddify/core/logger/sinks/file_sink.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:logging/logging.dart';
 
 /// one place that turns a record into one line of text
@@ -80,8 +81,6 @@ int errorFrames = 4;
 /// than at whoever called it.
 const _loggerInternals = 'package:hiddify/core/logger/';
 
-bool _isOurs(String frame) => frame.contains(ownPackagePrefix) && !frame.contains(_loggerInternals);
-
 /// Turns the first frame from our own code into `Class.method (file.dart:line)`.
 ///
 /// A raw frame looks like:
@@ -89,32 +88,8 @@ bool _isOurs(String frame) => frame.contains(ownPackagePrefix) && !frame.contain
 /// and only the method, the file name and the line are worth showing.
 String? originOf(StackTrace? stack) {
   if (stack == null) return null;
-
-  for (final frame in stack.toString().split('\n')) {
-    if (!_isOurs(frame)) continue;
-
-    final open = frame.indexOf('(');
-    final close = frame.lastIndexOf(')');
-    if (open == -1 || close <= open) continue;
-
-    // '#0      ProfileRepository.save ' -> 'ProfileRepository.save'
-    // The anonymous-closure suffix is dropped: it says nothing the file and
-    // line do not already say, and splitting on it used to leave 'closure>'.
-    final method = frame
-        .substring(0, open)
-        .replaceFirst(RegExp(r'^#\d+\s+'), '')
-        .replaceAll('.<anonymous closure>', '')
-        .trim();
-
-    // 'package:log_bench/data/repo.dart:88:12' -> ['...repo.dart', '88', '12']
-    final parts = frame.substring(open + 1, close).split(':');
-    if (parts.length < 3) continue;
-    final file = parts[parts.length - 3].split('/').last;
-    final line = parts[parts.length - 2];
-
-    return '$method ($file:$line)';
-  }
-  return null;
+  hiddifyRust.ensureAvailable('originOfStack');
+  return hiddifyRust.originOfStack(stack.toString(), ownPackagePrefix, _loggerInternals);
 }
 
 /// Keeps only the frames from our own code.
@@ -124,11 +99,9 @@ String? originOf(StackTrace? stack) {
 /// console readable — the surviving frames are still clickable.
 StackTrace? _ownFrames(StackTrace? stack) {
   if (stack == null) return null;
-
-  final mine = stack.toString().split('\n').where(_isOurs).take(errorFrames).toList();
-
-  if (mine.isEmpty) return null;
-  return StackTrace.fromString(mine.join('\n'));
+  hiddifyRust.ensureAvailable('ownStackFrames');
+  final mine = hiddifyRust.ownStackFrames(stack.toString(), ownPackagePrefix, _loggerInternals, errorFrames);
+  return mine == null ? null : StackTrace.fromString(mine);
 }
 
 void _toConsole(LogRecord r) {
@@ -146,15 +119,16 @@ void _toConsole(LogRecord r) {
 
 // ---------------------------------------------------------------------- file
 
-/// Errors only.
-///
-/// The file exists to survive a crash, and everything quieter than an error is
-/// already somewhere better: the page reads the in-memory ring, and the engine
-/// keeps its own complete log in data/box.log. Narrowing it to errors is also
-/// what lets the file stay unbounded — it grows by the handful, not by the
-/// thousand.
+/// Errors only in release; dev builds lower this to [Level.FINE] so app.log
+/// captures full diagnostic output alongside box.log.
+Level _fileLevel = Level.SEVERE;
+
+Level get fileLevel => _fileLevel;
+
+void logSetFileLevel(Level level) => _fileLevel = level;
+
 void _toFile(LogRecord r) {
-  if (r.level < Level.SEVERE) return;
+  if (r.level < _fileLevel) return;
   // the error itself, or the line says that something failed but not what
   final error = r.error;
   writeLogLine(error == null ? formatRecord(r) : '${formatRecord(r)}: ${'$error'.replaceAll('\n', ' ')}');
@@ -233,6 +207,7 @@ void logAddFile(String path) {
   openLogFile(path);
   // on web the sink never opens, so no listener is attached at all
   if (!isLogFileOpen) return;
+  _fileSub?.cancel();
   _fileSub = Logger.root.onRecord.listen(_toFile);
 }
 

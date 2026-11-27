@@ -1,5 +1,6 @@
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:hiddify/core/model/constants.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcore/hcore.pb.dart';
 import 'package:hiddify/singbox/model/singbox_config_enum.dart';
 
@@ -35,7 +36,7 @@ class ProxyItemEntity with _$ProxyItemEntity {
   bool get isVisible => !tag.contains("§hide§");
 }
 
-String _sanitizedTag(String tag) => tag.replaceFirst(RegExp(r"\§[^]*"), "").trimRight();
+String _sanitizedTag(String tag) => hiddifyRust.require(hiddifyRust.sanitizeTag(tag), 'sanitizeTag');
 // bool get isVisible => !tag.contains("§hide§");
 
 // Names the core gives its own groups (hiddify-core v2/config).
@@ -199,28 +200,20 @@ extension OutboundInfoCard on OutboundInfo {
 
   /// [type] without the status mark the core adds while the proxy is not ready
   /// ("WARP ⏳ Connecting..."); the row shows the status its own way.
-  String get typeWithoutStatus => status == Status.READY ? type : type.replaceFirst(_statusMark, '');
+  String get typeWithoutStatus =>
+      status == Status.READY ? type : hiddifyRust.require(hiddifyRust.stripStatusMark(type), 'stripStatusMark');
 
   /// A config the core could not read: it folds the reason into the type ("Invalid: bad uuid";
   /// hiddify-sing-box adapter/h_display.go).
-  bool get isInvalid => _invalidType.hasMatch(typeWithoutStatus);
+  bool get isInvalid => hiddifyRust.require(hiddifyRust.isInvalidProxyType(typeWithoutStatus), 'isInvalidProxyType');
 }
-
-final _invalidType = RegExp(r'^Invalid:?\s+\S');
-
-/// The endpoint the WARP scanner chose, as the core appends it to the display type
-/// (" · 🔍 162.159.192.1:2408", " · 🔍 [2606:4700:…]:443"; hiddify-sing-box hiddify/warpscan/status.go).
-final _scannerEndpoint = RegExp(r'^(.*?) · 🔍 (\[[0-9a-fA-F:]+\]:\d+|\d+\.\d+\.\d+\.\d+:\d+)(.*)$');
 
 /// [type] split round the WARP scanner's endpoint: what comes before it, the endpoint, and what
 /// follows it, such as the status mark. Null when the type has no endpoint.
 ({String before, String endpoint, String after})? splitScannerEndpoint(String type) {
-  final m = _scannerEndpoint.firstMatch(type);
-  return m == null ? null : (before: m[1]!, endpoint: m[2]!, after: m[3]!);
+  hiddifyRust.ensureAvailable('splitScannerEndpoint');
+  return hiddifyRust.splitScannerEndpoint(type);
 }
-
-/// The core's status mark: a space, one of its emoji, then the word (hiddify-sing-box adapter/h_status.go).
-final _statusMark = RegExp(r'\s+(⏳|⌛|🔍|❌|🔑)\s.*$');
 
 /// A proxies-page row's state. [untested] waits for its first ping; [pingFailed] is ready but its
 /// ping got no answer; [failed] is the core's FAILED, the proxy gave up; [resting] is one keep top

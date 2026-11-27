@@ -1,10 +1,10 @@
-import 'dart:convert';
 import 'dart:isolate';
 
 import 'package:hiddify/core/localization/translations.dart';
 import 'package:hiddify/core/model/failures.dart';
 import 'package:hiddify/core/notification/in_app_notification_controller.dart';
 import 'package:hiddify/core/router/dialog/dialog_notifier.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/profile/data/profile_data_providers.dart';
 import 'package:hiddify/features/profile/data/profile_repository.dart';
 import 'package:hiddify/features/profile/details/profile_details_state.dart';
@@ -126,24 +126,5 @@ class ProfileDetailsNotifier extends _$ProfileDetailsNotifier with AppLogger {
 
 /// The outbounds and endpoints of a generated config, the part the user edits; content that is
 /// not such JSON as it is.
-EditableConfig _editableConfig(String content) {
-  try {
-    final jsonObject = jsonDecode(content);
-    final List<Map<String, dynamic>> outbounds = [];
-    if (jsonObject is Map<String, dynamic> && jsonObject['outbounds'] is List) {
-      for (final outbound in jsonObject['outbounds'] as List<dynamic>) {
-        if (outbound is Map<String, dynamic> &&
-            outbound['type'] != null &&
-            !['selector', 'urltest', 'dns', 'block'].contains(outbound['type']) &&
-            !['direct', 'bypass', 'direct-fragment'].contains(outbound['tag'])) {
-          outbounds.add(outbound);
-        }
-      }
-    }
-    // ignore: avoid_dynamic_calls
-    final endpoints = jsonObject['endpoints'] as List? ?? [];
-    return (text: '{"outbounds": ${json.encode(outbounds)},"endpoints":${json.encode(endpoints)} }', isJson: true);
-  } catch (_) {
-    return (text: content, isJson: false);
-  }
-}
+EditableConfig _editableConfig(String content) =>
+    hiddifyRust.require(hiddifyRust.editableConfig(content), 'editableConfig');

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:hiddify/core/localization/translations.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcore/hcore.pb.dart';
 
 /// Why a subscription could not be downloaded, in terms a user can act on.
@@ -51,62 +52,34 @@ enum DownloadProblem {
   unknown;
 
   /// Whether trying again may help: not when the server said no, or its certificate is wrong.
-  bool get mayPass => switch (this) {
-    notFound || denied || badStatus || tooLarge || certificate => false,
-    _ => true,
-  };
+  bool get mayPass =>
+      hiddifyRust.require(hiddifyRust.downloadProblemMeta(index, null), 'downloadProblemMeta').mayPass;
 
-  static DownloadProblem ofStatus(int code) => switch (code) {
-    >= 500 => serverError,
-    404 || 410 => notFound,
-    401 || 403 => denied,
-    429 => tooManyRequests,
-    _ => badStatus,
-  };
+  static DownloadProblem ofStatus(int code) =>
+      values[hiddifyRust.require(hiddifyRust.downloadProblemOfStatus(code), 'downloadProblemOfStatus')];
 
   /// The problem of a download in the core that failed, null when it did not.
-  static DownloadProblem? ofCore(FetchUrlResponse response) => switch (response.error) {
-    FetchUrlError.FETCH_URL_ERROR_NONE =>
-      response.statusCode >= 200 && response.statusCode <= 299 ? null : ofStatus(response.statusCode),
-    FetchUrlError.FETCH_URL_ERROR_TIMEOUT => timeout,
-    FetchUrlError.FETCH_URL_ERROR_DNS => dns,
-    FetchUrlError.FETCH_URL_ERROR_REFUSED => refused,
-    FetchUrlError.FETCH_URL_ERROR_RESET => reset,
-    FetchUrlError.FETCH_URL_ERROR_UNREACHABLE => noInternet,
-    FetchUrlError.FETCH_URL_ERROR_TLS => tls,
-    FetchUrlError.FETCH_URL_ERROR_CERTIFICATE => certificate,
-    FetchUrlError.FETCH_URL_ERROR_TOO_LARGE => tooLarge,
-    _ => unknown,
-  };
+  static DownloadProblem? ofCore(FetchUrlResponse response) {
+    final idx = hiddifyRust.require(
+      hiddifyRust.downloadProblemOfCore(response.error.value, response.statusCode),
+      'downloadProblemOfCore',
+    );
+    return idx < 0 ? null : values[idx];
+  }
 
   static DownloadProblem ofDio(DioException err) {
-    if (err.response?.statusCode case final code? when code < 200 || code > 299) return ofStatus(code);
-    switch (err.type) {
-      case DioExceptionType.connectionTimeout || DioExceptionType.sendTimeout || DioExceptionType.receiveTimeout:
-        return timeout;
-      case DioExceptionType.badCertificate:
-        return certificate;
-      default:
-    }
     final cause = err.error;
-    if (cause is CertificateException) return certificate;
-    final text = '${cause ?? ''} ${err.message ?? ''}'.toLowerCase();
-    if (text.contains('certificate')) return certificate;
-    if (text.contains('failed host lookup') || text.contains('nodename nor servname') || text.contains('no address')) {
-      return dns;
-    }
-    if (text.contains('network is unreachable') || text.contains('no route to host')) return noInternet;
-    if (text.contains('refused')) return refused;
-    if (text.contains('reset by peer') ||
-        text.contains('connection reset') ||
-        text.contains('forcibly closed') ||
-        text.contains('terminated during handshake') ||
-        text.contains('broken pipe')) {
-      return reset;
-    }
-    if (text.contains('timed out')) return timeout;
-    if (cause is HandshakeException || cause is TlsException) return tls;
-    return unknown;
+    final idx = hiddifyRust.require(
+      hiddifyRust.downloadProblemClassifyDio(
+        statusCode: err.response?.statusCode,
+        dioType: err.type.name,
+        isCertExc: cause is CertificateException,
+        isTlsExc: cause is HandshakeException || cause is TlsException,
+        text: '${cause ?? ''} ${err.message ?? ''}',
+      ),
+      'downloadProblemClassifyDio',
+    );
+    return values[idx];
   }
 
   /// The technical words for a failed download here, without its URL, which carries the user's token.
@@ -125,40 +98,27 @@ enum DownloadProblem {
   }
 
   /// One problem for both downloads that failed: the one that tells the most.
-  static DownloadProblem mostTelling(Iterable<DownloadProblem> problems) =>
-      problems.fold(unknown, (a, b) => b.index < a.index ? b : a);
+  static DownloadProblem mostTelling(Iterable<DownloadProblem> problems) {
+    final idx = hiddifyRust.require(
+      hiddifyRust.downloadProblemMostTelling([for (final p in problems) p.index]),
+      'downloadProblemMostTelling',
+    );
+    return values[idx];
+  }
 
   /// The error number shown with every failure as "ERROR 403", for the user to quote to support:
   /// the HTTP status when the server answered, a short name otherwise.
-  String code(int? status) => switch (this) {
-    serverError || notFound || denied || tooManyRequests || badStatus => '${status ?? '?'}',
-    tooLarge => 'TOO_LARGE',
-    noInternet => 'NET_OFFLINE',
-    dns => 'DNS_NOT_FOUND',
-    certificate => 'TLS_CERT',
-    reset => 'CONN_RESET',
-    tls => 'TLS_FAILED',
-    refused => 'CONN_REFUSED',
-    timeout => 'NET_TIMEOUT',
-    unknown => 'UNKNOWN',
-  };
+  String code(int? status) =>
+      hiddifyRust.require(hiddifyRust.downloadProblemMeta(index, status), 'downloadProblemMeta').code;
 
   /// How far the download got on its way from the device, over the internet, to the provider: the
   /// stop that failed (0 the device, 1 the internet, 2 the provider), null when that is not known.
-  int? get failedStop => switch (this) {
-    noInternet => 0,
-    dns || certificate || reset || tls || timeout => 1,
-    serverError || notFound || denied || tooManyRequests || badStatus || tooLarge || refused => 2,
-    unknown => null,
-  };
+  int? get failedStop =>
+      hiddifyRust.require(hiddifyRust.downloadProblemMeta(index, null), 'downloadProblemMeta').failedStop;
 
   /// Whose side the problem is on, for the user to know who can fix it.
-  DownloadProblemSide get side => switch (this) {
-    serverError || tooManyRequests || badStatus || tooLarge || refused => DownloadProblemSide.provider,
-    notFound || denied => DownloadProblemSide.subscription,
-    noInternet || dns || certificate || reset || tls || timeout => DownloadProblemSide.network,
-    unknown => DownloadProblemSide.unknown,
-  };
+  DownloadProblemSide get side => DownloadProblemSide
+      .values[hiddifyRust.require(hiddifyRust.downloadProblemMeta(index, null), 'downloadProblemMeta').side];
 
   /// The words for the user: a title, what happened, and what to try. [code] is the HTTP status.
   ({String title, String why, List<String> tips}) text(TranslationsEn t, {int? code}) {

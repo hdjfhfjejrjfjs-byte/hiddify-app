@@ -36,6 +36,7 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+/build_output/
 
 # generated files
 **/*.g.dart
@@ -48,6 +49,7 @@ _missing_translations*.json
 _unused_translations*.json
 **/*.dll
 **/*.dylib
+**/*.so
 **/*.xcframework
 /dist/
 /dist_docker/

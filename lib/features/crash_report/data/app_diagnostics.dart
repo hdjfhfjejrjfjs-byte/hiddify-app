@@ -5,6 +5,7 @@ import 'package:hiddify/core/app_info/app_info_provider.dart';
 import 'package:hiddify/core/localization/locale_preferences.dart';
 import 'package:hiddify/core/model/environment.dart';
 import 'package:hiddify/core/preferences/preferences_provider.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/connection/notifier/connection_notifier.dart';
 import 'package:hiddify/features/profile/data/profile_data_providers.dart';
 import 'package:hiddify/features/profile/model/profile_entity.dart';
@@ -12,13 +13,6 @@ import 'package:hiddify/features/profile/notifier/active_profile_notifier.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcommon/common.pb.dart';
 import 'package:hiddify/hiddifycore/hiddify_core_service_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-
-/// Preferences whose value is a secret or names the user's own apps: the report says only whether
-/// they are set (or how many entries a list has), never what they hold.
-final _hiddenPreference = RegExp('password|secret|license|token|pairing|clean-ip|per_app_proxy_(include|exclude)_list');
-
-/// A longer value (a rule list, a JSON blob) is cut, so one preference cannot crowd out the logs.
-const _maxPreferenceLength = 4000;
 
 /// What the core can not know and a developer asks first: which build this is, on what system,
 /// what the app thinks the connection is doing, the user's settings without secrets, the profile
@@ -178,22 +172,6 @@ Future<List<Map<String, Object?>>> _network() async {
 
 Map<String, Object?> _settings(Ref ref) {
   final preferences = ref.read(sharedPreferencesProvider).requireValue;
-  final keys = preferences.getKeys().toList()..sort();
-  return {for (final key in keys) key: _preferenceValue(key, preferences.get(key))};
-}
-
-Object? _preferenceValue(String key, Object? value) {
-  if (_hiddenPreference.hasMatch(key)) {
-    return switch (value) {
-      null => null,
-      final List<Object?> list => '<${list.length} entries>',
-      final String text when key.endsWith('_list') => '<${text.split(';').where((e) => e.isNotEmpty).length} entries>',
-      final String text when text.isEmpty => '<empty>',
-      _ => '<set>',
-    };
-  }
-  if (value is String && value.length > _maxPreferenceLength) {
-    return '${value.substring(0, _maxPreferenceLength)}… <${value.length} characters>';
-  }
-  return value;
+  final raw = {for (final key in preferences.getKeys()) key: preferences.get(key)};
+  return hiddifyRust.require(hiddifyRust.scrubPreferences(raw), 'scrubPreferences');
 }

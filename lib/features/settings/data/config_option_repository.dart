@@ -5,12 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:fpdart/fpdart.dart';
 import 'package:hiddify/core/model/optional_range.dart';
 import 'package:hiddify/core/model/region.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/core/utils/exception_handler.dart';
 import 'package:hiddify/core/utils/json_converters.dart';
 import 'package:hiddify/core/utils/preferences_utils.dart';
 import 'package:hiddify/features/crash_report/notifier/trace_session_notifier.dart';
 import 'package:hiddify/features/log/model/log_level.dart';
-import 'package:hiddify/features/profile/data/profile_parser.dart';
 import 'package:hiddify/features/route_rules/notifier/rules_notifier.dart';
 import 'package:hiddify/features/settings/model/config_option_failure.dart';
 import 'package:hiddify/hiddifycore/generated/v2/config/route_rule.pb.dart';
@@ -315,6 +315,9 @@ abstract class ConfigOptions {
     "",
   );
 
+  // ChainMode.warp ('warp_auto') paired with extraSecurityWarpTunnel (WarpTunnel.auto) sends
+  // 'warp_auto' to the core by default, racing WireGuard, AmneziaWG and MASQUE instead of
+  // UDP-only WireGuard ('warp').
   static final extraSecurityMode = PreferencesNotifier.create<ChainMode, String>(
     "extra-security-mode",
     ChainMode.warp,
@@ -721,9 +724,11 @@ class ConfigOptionRepository with ExceptionHandler, InfraLogger {
   Either<ConfigOptionFailure, SingboxConfigOption> fullOptionsOverrided(String? profileOverride) =>
       Either.tryCatch(() => _getConfigOptions(), ConfigOptionFailure.unexpected).flatMap(
         (options) => Either.tryCatch(() {
-          final own = options.toJson();
-          final merged = ProfileParser.applyProfileOverride(options.toJson(), profileOverride);
-          return SingboxConfigOption.fromJson(keepOwnDnsBehindExtraSecurity(own, merged));
+          final merged = hiddifyRust.require(
+            hiddifyRust.mergeOptionsWithProfileOverride(options.toJson(), profileOverride),
+            'mergeOptionsWithProfileOverride',
+          );
+          return SingboxConfigOption.fromJson(merged);
         }, ConfigOptionFailure.unexpected),
       );
 
@@ -732,10 +737,8 @@ class ConfigOptionRepository with ExceptionHandler, InfraLogger {
   /// settings or from the profile itself, the profile's remote DNS is not applied and the user's
   /// own stays; the core adds DoH through the profile alone as the group's last resort.
   @visibleForTesting
-  static Map<String, dynamic> keepOwnDnsBehindExtraSecurity(Map<String, dynamic> own, Map<String, dynamic> merged) {
-    if (merged['chain-status'] != ChainStatus.extraSecurity.key) return merged;
-    return {...merged, 'remote-dns-address': own['remote-dns-address']};
-  }
+  static Map<String, dynamic> keepOwnDnsBehindExtraSecurity(Map<String, dynamic> own, Map<String, dynamic> merged) =>
+      hiddifyRust.require(hiddifyRust.keepOwnDnsBehindExtraSecurity(own, merged), 'keepOwnDnsBehindExtraSecurity');
 }
 
 typedef _Preference<T, P> = StateNotifierProvider<PreferencesNotifier<T, P>, T>;

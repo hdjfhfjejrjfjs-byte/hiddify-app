@@ -10,15 +10,13 @@ import 'package:hiddify/core/localization/translations.dart';
 import 'package:hiddify/core/model/region.dart';
 import 'package:hiddify/core/notification/in_app_notification_controller.dart';
 import 'package:hiddify/core/router/dialog/dialog_notifier.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/settings/data/config_option_repository.dart';
 import 'package:hiddify/hiddifycore/generated/v2/config/route_rule.pb.dart';
 import 'package:hiddify/utils/utils.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 part 'rules_notifier.g.dart';
-
-const _geoUrl = 'https://raw.githubusercontent.com/hiddify/hiddify-geo/rule-set';
-const _geositeUrl = 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set';
 
 /// Rules the app ships with, in the order a new list starts with. They are always in the list: the user can
 /// only switch and move them, and their content comes from here, so an update can change it.
@@ -35,11 +33,11 @@ enum BuiltinRule {
   /// Saved as the rule's name; the list shows [present] instead.
   String get key => 'builtin:$name';
 
-  /// The names built-in rules were saved under before, each with the rule it is now.
-  static const _formerKeys = {'builtin:appleDirect': systemDirect};
-
-  static BuiltinRule? of(Rule rule) =>
-      values.where((builtin) => builtin.key == rule.name).firstOrNull ?? _formerKeys[rule.name];
+  static BuiltinRule? of(Rule rule) {
+    hiddifyRust.ensureAvailable('builtinOfRuleName');
+    final short = hiddifyRust.builtinOfRuleName(rule.name);
+    return short == null ? null : values.asNameMap()[short];
+  }
 
   String present(Translations t, Region region) => switch (this) {
     bypassLan => t.pages.settings.routing.builtinRules.bypassLan,
@@ -53,104 +51,9 @@ enum BuiltinRule {
     bypassRegion => t.pages.settings.routing.builtinRules.bypassRegion(region: region.presentName(t)),
   };
 
-  Rule get rule => switch (this) {
-    bypassLan => Rule(
-      outbound: Outbound.direct,
-      // the ranges sing-box treats as private (ip_is_private)
-      ipCidrs: [
-        '10.0.0.0/8',
-        '172.16.0.0/12',
-        '192.168.0.0/16',
-        '127.0.0.0/8',
-        '169.254.0.0/16',
-        '224.0.0.0/4',
-        '0.0.0.0/32',
-        'fc00::/7',
-        'fe80::/10',
-        '::1/128',
-        'ff00::/8',
-        '::/128',
-      ],
-    ),
-    // The system's own services (updates, app store, push, cloud sync) are not filtered and move a lot of
-    // data, so they go direct instead of through the proxy. The rule set carries the full list; the suffixes
-    // cover the main services until it is downloaded, and if it never is.
-    systemDirect => switch (defaultTargetPlatform) {
-      TargetPlatform.iOS || TargetPlatform.macOS => Rule(
-        outbound: Outbound.direct,
-        ruleSets: ['$_geositeUrl/geosite-apple.srs'],
-        domainSuffixes: [
-          'apple.com',
-          'icloud.com',
-          'icloud-content.com',
-          'apple-dns.net',
-          'cdn-apple.com',
-          'mzstatic.com',
-          'aaplimg.com',
-          'itunes.com',
-          'apple-cloudkit.com',
-          'apple-mapkit.com',
-          'testflight.apple.com',
-        ],
-      ),
-      TargetPlatform.windows => Rule(
-        outbound: Outbound.direct,
-        ruleSets: ['$_geositeUrl/geosite-microsoft.srs'],
-        domainSuffixes: [
-          'microsoft.com',
-          'windows.com',
-          'windows.net',
-          'windowsupdate.com',
-          'msftconnecttest.com',
-          'msftncsi.com',
-          'live.com',
-          'office.com',
-          'office.net',
-          'microsoftonline.com',
-          'onedrive.com',
-          'msedge.net',
-        ],
-      ),
-      // Google Play is left out: it refuses some countries' addresses, so it only works through the proxy there.
-      TargetPlatform.android || TargetPlatform.fuchsia => Rule(
-        outbound: Outbound.direct,
-        ruleSets: ['$_geositeUrl/geosite-android.srs', '$_geositeUrl/geosite-googlefcm.srs'],
-        domainSuffixes: ['android.com', 'mtalk.google.com'],
-      ),
-      TargetPlatform.linux => Rule(
-        outbound: Outbound.direct,
-        ruleSets: [
-          '$_geositeUrl/geosite-ubuntu.srs',
-          '$_geositeUrl/geosite-debian.srs',
-          '$_geositeUrl/geosite-fedora.srs',
-          '$_geositeUrl/geosite-archlinux.srs',
-        ],
-        domainSuffixes: [
-          'ubuntu.com',
-          'debian.org',
-          'fedoraproject.org',
-          'archlinux.org',
-          'flathub.org',
-          'snapcraft.io',
-        ],
-      ),
-    },
-    blockAds => Rule(
-      outbound: Outbound.block,
-      ruleSets: [
-        '$_geoUrl/block/geosite-category-ads-all.srs',
-        '$_geoUrl/block/geosite-malware.srs',
-        '$_geoUrl/block/geosite-phishing.srs',
-        '$_geoUrl/block/geosite-cryptominers.srs',
-        '$_geoUrl/block/geoip-malware.srs',
-        '$_geoUrl/block/geoip-phishing.srs',
-      ],
-    ),
-    bypassRegion => Rule(
-      outbound: Outbound.direct,
-      ruleSets: ['$_geoUrl/country/geosite-{region}.srs', '$_geoUrl/country/geoip-{region}.srs'],
-    ),
-  }..name = key;
+  Rule get rule => Rule.fromJson(
+    hiddifyRust.require(hiddifyRust.builtinRulePbJson(name, defaultTargetPlatform.name), 'builtinRulePbJson'),
+  );
 }
 
 @riverpod
@@ -174,24 +77,15 @@ class RulesNotifier extends _$RulesNotifier with AppLogger {
   /// first, as in a new list. The region rule does nothing while the region is Other, so it's left out then.
   List<Rule> _withBuiltins(List<Rule> saved) {
     final region = ref.read(ConfigOptions.region);
-    // the built-ins the list needs, in their own order; each one found in the saved list is crossed off
-    final missing = {
-      for (final builtin in BuiltinRule.values)
-        if (builtin != BuiltinRule.bypassRegion || region != Region.other) builtin,
-    };
-    final rules = <Rule>[];
-    for (final rule in saved) {
-      final builtin = BuiltinRule.of(rule);
-      if (builtin == null) {
-        rules.add(rule);
-      } else if (missing.remove(builtin)) {
-        rules.add(builtin.rule..enabled = rule.enabled);
-      }
-    }
-    return _updateListOrder([
-      for (final builtin in missing) builtin.rule..enabled = builtin.enabledByDefault,
-      ...rules,
-    ]);
+    final pbJson = hiddifyRust.require(
+      hiddifyRust.withBuiltinsPbJson(
+        RouteRule(rules: saved).writeToJson(),
+        region.name,
+        defaultTargetPlatform.name,
+      ),
+      'withBuiltinsPbJson',
+    );
+    return RouteRule.fromJson(pbJson).rules;
   }
 
   /// A new rule goes first, so it's checked before every other rule.
@@ -205,17 +99,14 @@ class RulesNotifier extends _$RulesNotifier with AppLogger {
   /// A copy of a rule, placed right after the original and open to any change: the way to tailor a
   /// built-in rule, which itself cannot be edited. Returns the copy's list order.
   Future<int> duplicateRule(int listOrder) async {
-    final current = state;
-    final index = current.indexWhere((element) => element.listOrder == listOrder);
-    if (index == -1) return listOrder;
-    final source = current[index];
-    final builtin = BuiltinRule.of(source);
-    final copy = source.deepCopy()
-      ..name = builtin == null ? '${source.name} (2)' : builtin.name
-      ..enabled = false;
-    state = _updateListOrder([...current.sublist(0, index + 1), copy, ...current.sublist(index + 1)]);
+    final dup = hiddifyRust.require(
+      hiddifyRust.duplicateRulePbJson(RouteRule(rules: state).writeToJson(), listOrder),
+      'duplicateRulePbJson',
+    );
+    if (dup.order == listOrder && !state.any((e) => e.listOrder == listOrder)) return listOrder;
+    state = RouteRule.fromJson(dup.pbJson).rules;
     await _updateFile();
-    return index + 1;
+    return dup.order;
   }
 
   Future<void> updateRule(Rule rule) async {

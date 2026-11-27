@@ -3,13 +3,17 @@ set -euo pipefail
 
 # Builds Contents/Helpers/Hiddify Core.app: the app's core in a process of its own. The app starts
 # its executable as `Hiddify core …` (lib/hiddifycore/core_interface/core_process.dart). It is the
-# launcher every desktop build shares (hiddify-core/cmd/launcher/main.c), which loads
+# `#![no_std]` Rust launcher every desktop build shares (hiddify-core/cmd/launcher), which loads
 # hiddify-core.dylib from the app's Frameworks. The bundle gives the process the name Hiddify and
 # the core icon in Activity Monitor: the launcher checks in as a background-only app, the only kind
 # Activity Monitor shows an icon for, and holds a user-initiated activity so App Nap does not slow it
 # down while the app is in the background.
 
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 task_root="$(cd "$(dirname "$0")/../.." && pwd)"
+task_core_dir="${HIDDIFY_CORE_DIR:-$task_root/hiddify-core}"
+task_launcher_dir="$task_core_dir/cmd/launcher"
 task_helper="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/Hiddify Core.app"
 
 # Built again only when what it is made from changed. Xcode does not know this phase writes into the
@@ -17,7 +21,11 @@ task_helper="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/Hiddify Core.app"
 # leave the app's signature behind ("nested code is modified or invalid").
 task_stamp="$DERIVED_FILE_DIR/HiddifyCore.stamp"
 task_inputs="$(
-  cat "$0" "$task_root/hiddify-core/cmd/launcher/main.c" "$task_root/macos/CoreHelper/CoreIcon.icon/icon.json" \
+  cat "$0" \
+    "$task_launcher_dir/Cargo.toml" \
+    "$task_launcher_dir/build.rs" \
+    "$task_launcher_dir/src/main.rs" \
+    "$task_root/macos/CoreHelper/CoreIcon.icon/icon.json" \
     "$task_root"/macos/CoreHelper/CoreIcon.icon/Assets/*
   echo "${ARCHS:-} ${EXPANDED_CODE_SIGN_IDENTITY:-} ${ENABLE_HARDENED_RUNTIME:-} ${PRODUCT_BUNDLE_IDENTIFIER:-}"
   echo "${CODE_SIGN_ENTITLEMENTS:-}"
@@ -33,15 +41,37 @@ fi
 rm -rf "$task_helper" "$task_stamp"
 mkdir -p "$task_helper/Contents/MacOS" "$task_helper/Contents/Resources"
 
-task_arch_flags=()
+task_cargo_target_dir="${DERIVED_FILE_DIR:-$task_launcher_dir/target}/launcher-target"
+task_slices=()
 for task_arch in ${ARCHS:-$(uname -m)}; do
-  task_arch_flags+=(-arch "$task_arch")
+  case "$task_arch" in
+    arm64)  task_rust_target="aarch64-apple-darwin" ;;
+    x86_64) task_rust_target="x86_64-apple-darwin" ;;
+    *)
+      echo "error: unsupported macOS architecture '$task_arch' for Hiddify Core helper" >&2
+      exit 1
+      ;;
+  esac
+  if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -qx "$task_rust_target"; then
+    rustup target add "$task_rust_target"
+  fi
+  MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}" \
+  HIDDIFY_LAUNCHER_LIBRARY="../../../../Frameworks/hiddify-core.dylib" \
+    cargo build \
+      --manifest-path "$task_launcher_dir/Cargo.toml" \
+      --target-dir "$task_cargo_target_dir" \
+      --release \
+      --features macos_app \
+      --target "$task_rust_target"
+  task_slices+=("$task_cargo_target_dir/$task_rust_target/release/hiddify-launcher")
 done
-xcrun clang -O2 -Wall "${task_arch_flags[@]}" \
-  -mmacosx-version-min="${MACOSX_DEPLOYMENT_TARGET:-12.0}" \
-  -DHIDDIFY_LAUNCHER_LIBRARY='"../../../../Frameworks/hiddify-core.dylib"' -DHIDDIFY_LAUNCHER_MACOS_APP \
-  -framework AppKit -framework Foundation \
-  -o "$task_helper/Contents/MacOS/Hiddify" "$task_root/hiddify-core/cmd/launcher/main.c"
+
+if [[ "${#task_slices[@]}" -eq 1 ]]; then
+  cp "${task_slices[0]}" "$task_helper/Contents/MacOS/Hiddify"
+else
+  xcrun lipo -create "${task_slices[@]}" -output "$task_helper/Contents/MacOS/Hiddify"
+fi
+chmod 0755 "$task_helper/Contents/MacOS/Hiddify"
 
 # The core icon: the app's icon with its colors swapped (macos/CoreHelper/CoreIcon.icon).
 mkdir -p "$DERIVED_FILE_DIR"

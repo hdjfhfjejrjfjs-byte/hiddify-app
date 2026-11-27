@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/profile/add/phone_import/phone_import_page.dart';
 
 export 'package:hiddify/features/profile/add/phone_import/phone_import_page.dart'
@@ -79,10 +79,7 @@ class PhoneImportServer {
     await _entries.close();
   }
 
-  static String _newToken() {
-    final random = Random.secure();
-    return List.generate(tokenLength, (_) => random.nextInt(10)).join();
-  }
+  static String _newToken() => hiddifyRust.require(hiddifyRust.generateNumericPin(tokenLength), 'generateNumericPin');
 
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
@@ -112,18 +109,13 @@ class PhoneImportServer {
     }
   }
 
-  bool _isOwnHost(HttpRequest request) => request.headers.value(HttpHeaders.hostHeader)?.toLowerCase() == url.authority;
+  bool _isOwnHost(HttpRequest request) => hiddifyRust.require(
+    hiddifyRust.isAllowedHostHeader(request.headers.value(HttpHeaders.hostHeader), url.authority),
+    'isAllowedHostHeader',
+  );
 
   /// The secret path, compared in constant time.
-  bool _isOwnPath(String path) {
-    final expected = '/$_token';
-    if (path.length != expected.length) return false;
-    var diff = 0;
-    for (var i = 0; i < path.length; i++) {
-      diff |= path.codeUnitAt(i) ^ expected.codeUnitAt(i);
-    }
-    return diff == 0;
-  }
+  bool _isOwnPath(String path) => hiddifyRust.require(hiddifyRust.verifySecretPath(path, _token), 'verifySecretPath');
 
   Future<void> _receive(HttpRequest request, InternetAddress remote) async {
     final response = request.response;
@@ -139,14 +131,19 @@ class PhoneImportServer {
       // a form encodes a byte as at most three
       if (body.length > maxText * 3) return _plain(response, HttpStatus.requestEntityTooLarge, 'Too large');
     }
-    final String text;
-    try {
-      text = (Uri.splitQueryString(utf8.decode(body.takeBytes()))['link'] ?? '').trim();
-    } on FormatException {
-      return _plain(response, HttpStatus.badRequest, 'Bad request');
+    final parsed = hiddifyRust.require(
+      hiddifyRust.parsePhoneImportForm(body.takeBytes(), maxText),
+      'parsePhoneImportForm',
+    );
+    switch (parsed.status) {
+      case 'bad_request':
+        return _plain(response, HttpStatus.badRequest, 'Bad request');
+      case 'too_large':
+        return _plain(response, HttpStatus.requestEntityTooLarge, 'Too large');
+      case 'empty':
+        return _page(response, sent: false, status: HttpStatus.badRequest, error: _text.empty);
     }
-    if (utf8.encode(text).length > maxText) return _plain(response, HttpStatus.requestEntityTooLarge, 'Too large');
-    if (text.isEmpty) return _page(response, sent: false, status: HttpStatus.badRequest, error: _text.empty);
+    final text = parsed.text!;
     if (_pending >= maxPending) return _plain(response, HttpStatus.tooManyRequests, 'Too many requests');
     _pending++;
     _entries.add(PhoneEntry(text: text, from: remote, at: DateTime.now()));
@@ -188,17 +185,5 @@ class PhoneImportServer {
 
 /// Whether [address] is on a local network: private IPv4 (10/8, 172.16/12, 192.168/16), link-local,
 /// unique-local IPv6 (fc00::/7) or loopback.
-bool isLocalNetwork(InternetAddress address) {
-  final ip = address.type == InternetAddressType.IPv6 && _isMappedIPv4(address.rawAddress)
-      ? InternetAddress.fromRawAddress(address.rawAddress.sublist(12))
-      : address;
-  if (ip.isLoopback || ip.isLinkLocal) return true;
-  final b = ip.rawAddress;
-  if (ip.type == InternetAddressType.IPv4) {
-    return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168);
-  }
-  return (b[0] & 0xfe) == 0xfc;
-}
-
-bool _isMappedIPv4(Uint8List b) =>
-    b.length == 16 && b.sublist(0, 10).every((x) => x == 0) && b[10] == 0xff && b[11] == 0xff;
+bool isLocalNetwork(InternetAddress address) =>
+    hiddifyRust.require(hiddifyRust.isLocalNetworkBytes(address.rawAddress), 'isLocalNetworkBytes');

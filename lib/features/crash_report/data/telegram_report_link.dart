@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:ffi' show Abi;
 import 'dart:io';
 
@@ -6,10 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hiddify/core/model/constants.dart';
 import 'package:hiddify/core/model/environment.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:path/path.dart' as p;
-
-/// The longest start parameter Telegram passes to a bot.
-const _maxPayload = 64;
 
 /// The issues bot's link with this device's details as its start parameter: `;`-separated
 /// `key=value` pairs, base64url without padding. Each key has one name and each value one code;
@@ -33,34 +30,10 @@ Uri telegramReportLink({
   String? l,
   String? a,
 }) {
-  String encode(Map<String, String?> fields) => base64Url
-      .encode(
-        utf8.encode(
-          [
-            for (final MapEntry(:key, :value) in fields.entries)
-              if (value != null && _clean(value).isNotEmpty) '$key=${_clean(value)}',
-          ].join(';'),
-        ),
-      )
-      .replaceAll('=', '');
-
-  var version = ov;
-  Map<String, String?> fields({bool language = true, bool arch = true}) => {
-    'os': os,
-    'ov': version,
-    'v': v,
-    'pm': pm,
-    't': t,
-    if (language) 'l': l,
-    if (arch) 'a': a,
-  };
-  var payload = encode(fields());
-  if (payload.length > _maxPayload) payload = encode(fields(arch: false));
-  if (payload.length > _maxPayload) payload = encode(fields(arch: false, language: false));
-  while (payload.length > _maxPayload && version.isNotEmpty) {
-    version = version.substring(0, version.length - 1);
-    payload = encode(fields(arch: false, language: false));
-  }
+  final payload = hiddifyRust.require(
+    hiddifyRust.telegramPayload(os: os, ov: ov, v: v, t: t, pm: pm, l: l, a: a),
+    'telegramPayload',
+  );
   return Uri.https('t.me', '/${Constants.bugReportTelegramBot}', {'start': payload});
 }
 
@@ -120,58 +93,14 @@ Future<(String, String)> _system({required bool tv}) async {
 /// `11` or `10`, from Windows's `"Windows 10 Pro" 10.0 (Build 22631)`: Windows 11 still says 10.0,
 /// only its build tells.
 @visibleForTesting
-String windowsVersion(String operatingSystemVersion) {
-  final build = int.tryParse(RegExp(r'Build (\d+)').firstMatch(operatingSystemVersion)?.group(1) ?? '');
-  if (build == null) return '';
-  return build >= 22000 ? '11' : '10';
-}
+String windowsVersion(String operatingSystemVersion) =>
+    hiddifyRust.require(hiddifyRust.windowsVersion(operatingSystemVersion), 'windowsVersion');
 
 /// The bot's code for the distro an os-release file names, with its version; `linux` for one the
 /// bot does not know.
 @visibleForTesting
-(String, String) linuxDistro(String osRelease) {
-  final values = {
-    for (final line in const LineSplitter().convert(osRelease))
-      if (line.indexOf('=') case final at when at > 0)
-        line.substring(0, at).trim(): line.substring(at + 1).trim().replaceAll(RegExp(r'''^["']|["']$'''), ''),
-  };
-  final id = (values['ID'] ?? '').toLowerCase();
-  final code = switch (id) {
-    'ubuntu' => 'ubu',
-    'debian' => 'deb',
-    'fedora' => 'fed',
-    'linuxmint' => 'mint',
-    'arch' => 'arch',
-    'manjaro' => 'manj',
-    'endeavouros' => 'eos',
-    'cachyos' => 'cachy',
-    'garuda' => 'garu',
-    'pop' => 'pop',
-    'elementary' => 'elem',
-    'zorin' => 'zorin',
-    'mx' => 'mx',
-    'neon' => 'neon',
-    'kali' => 'kali',
-    'almalinux' => 'alma',
-    'rocky' => 'rocky',
-    'centos' => 'cent',
-    'rhel' => 'rhel',
-    'nixos' => 'nix',
-    'gentoo' => 'gen',
-    'void' => 'void',
-    'alpine' => 'alp',
-    'deepin' => 'deep',
-    'kylin' || 'ubuntukylin' => 'kylin',
-    'astra' => 'astra',
-    'solus' => 'sol',
-    'slackware' => 'slack',
-    'steamos' => 'steam',
-    'bazzite' => 'bazz',
-    _ when id.startsWith('opensuse') || id == 'sles' => 'sus',
-    _ => 'linux',
-  };
-  return (code, values['VERSION_ID'] ?? '');
-}
+(String, String) linuxDistro(String osRelease) =>
+    hiddifyRust.require(hiddifyRust.linuxDistro(osRelease), 'linuxDistro');
 
 /// How this copy was installed, as the bot names it: the store's own build, or else what the
 /// files around the app say; null when nothing tells.
@@ -221,6 +150,3 @@ Future<String?> _packageMode(Release release) async {
 
 /// `arm64`, `x64`, `arm`, `ia32` or `riscv64`.
 String _arch() => Abi.current().toString().split('_').last;
-
-/// What a value may hold: a `;` or `=` would split the payload in the wrong place.
-String _clean(String value) => value.replaceAll(RegExp('[^A-Za-z0-9._-]'), '');

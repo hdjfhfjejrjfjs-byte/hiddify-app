@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/hiddifycore/core_interface/windows_crash.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcore/hcore.pb.dart';
 import 'package:hiddify/utils/custom_loggers.dart';
@@ -34,8 +35,6 @@ class CoreProcessException implements Exception {
 class CoreProcess {
   CoreProcess._(this._process, this.serverCertificatePem, this._crashFile, this._stderrTail, this._startedAt);
 
-  static const _readyPrefix = 'HIDDIFY_CORE_READY ';
-  static const _errorPrefix = 'HIDDIFY_CORE_ERROR ';
   static const _secretEnv = 'HIDDIFY_CORE_SECRET';
   // The setup loads the core's data and can take a while on a slow disk.
   static const _readyTimeout = Duration(seconds: 60);
@@ -128,12 +127,14 @@ class CoreProcess {
     final ready = Completer<String>();
     // Both pipes are read to the end: a full pipe would block the core.
     process.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
-      if (!ready.isCompleted && line.startsWith(_readyPrefix)) {
-        ready.complete(line.substring(_readyPrefix.length).trim());
-      } else if (!ready.isCompleted && line.startsWith(_errorPrefix)) {
-        ready.completeError(CoreProcessException(line.substring(_errorPrefix.length)));
-      } else if (line.isNotEmpty) {
-        _logger.debug('core: $line');
+      final event = hiddifyRust.require(hiddifyRust.parseCoreStdoutLine(line), 'parseCoreStdoutLine');
+      switch (event.kind) {
+        case 'ready' when !ready.isCompleted:
+          ready.complete(event.certificatePem ?? '');
+        case 'error' when !ready.isCompleted:
+          ready.completeError(CoreProcessException(event.message ?? 'core error'));
+        case 'log':
+          _logger.debug('core: ${event.line}');
       }
     }, onError: (Object _) {});
     final stderrDone = Completer<void>();
@@ -164,10 +165,10 @@ class CoreProcess {
     );
 
     try {
-      final certificate = await ready.future.timeout(_readyTimeout);
+      final certificatePem = await ready.future.timeout(_readyTimeout);
       return CoreProcess._(
         process,
-        certificate.isEmpty ? '' : utf8.decode(base64.decode(certificate)),
+        certificatePem,
         crashFile,
         stderrTail,
         startedAt,
@@ -179,7 +180,6 @@ class CoreProcess {
   }
 
   static const _stderrTailLines = 50;
-  static const _maxReasonLength = 300;
 
   /// Why the core crashed, from its Go crash output: the `panic:`, `fatal error:` or Windows
   /// `Exception` line. Without one, on Windows, what Windows recorded (see [WindowsCrash]); else
@@ -194,31 +194,15 @@ class CoreProcess {
   /// setup re-creates it showed the panic of an earlier crash as its own.
   @visibleForTesting
   static Future<String?> crashReasonOf(File crashFile, List<String> stderrTail, DateTime startedAt) async {
-    String? fromFile;
-    try {
-      if (await crashFile.exists() &&
-          !(await crashFile.lastModified()).isBefore(startedAt.subtract(const Duration(seconds: 1)))) {
-        fromFile = crashHeadline(await crashFile.readAsString());
-      }
-    } catch (e) {
-      _logger.debug('cannot read the core crash output: $e');
-    }
-    return fromFile ?? crashHeadline(stderrTail.join('\n'));
+    hiddifyRust.ensureAvailable('coreCrashReasonOf');
+    return hiddifyRust.coreCrashReasonOf(crashFile.path, stderrTail, startedAt.millisecondsSinceEpoch);
   }
 
   /// The line of a Go crash output that says what went wrong, shortened, or null when [output]
   /// holds no crash.
   static String? crashHeadline(String output) {
-    final lines = const LineSplitter().convert(output).map((line) => line.trim()).toList();
-    final line =
-        lines.where((line) => line.startsWith('panic: ') || line.startsWith('fatal error: ')).firstOrNull ??
-        lines.where((line) => RegExp('^SIG[A-Z]+: ').hasMatch(line)).firstOrNull ??
-        // Go's own report of a Windows exception it did not turn into a panic (in C code on a Go
-        // thread): "Exception 0xc0000005 0x0 0x... 0x...", then the stack. It was not read, and
-        // the crash showed as an exit code only.
-        lines.where((line) => RegExp('^Exception 0x[0-9a-fA-F]+').hasMatch(line)).firstOrNull;
-    if (line == null) return null;
-    return line.length > _maxReasonLength ? '${line.substring(0, _maxReasonLength)}…' : line;
+    hiddifyRust.ensureAvailable('coreCrashHeadline');
+    return hiddifyRust.coreCrashHeadline(output);
   }
 
   /// Stops the core gracefully, so it can restore the system proxy, and kills it if it does not exit.

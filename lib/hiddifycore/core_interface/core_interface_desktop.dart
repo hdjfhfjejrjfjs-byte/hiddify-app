@@ -3,12 +3,12 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:grpc/grpc.dart';
 import 'package:hiddify/core/model/directories.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/gen/hiddify_core_generated_bindings.dart';
 import 'package:hiddify/hiddifycore/core_interface/core_interface.dart';
 import 'package:hiddify/hiddifycore/core_interface/core_process.dart';
@@ -101,11 +101,8 @@ class CoreInterfaceDesktop extends CoreInterface with InfraLogger {
   }
 
   final int port;
-  static String generateRandomPassword(int length) {
-    const characters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final random = Random();
-    return List.generate(length, (_) => characters[random.nextInt(characters.length)]).join();
-  }
+  static String generateRandomPassword(int length) =>
+      hiddifyRust.require(hiddifyRust.generateAlphanumericSecret(length), 'generateAlphanumericSecret');
 
   static final String secret = generateRandomPassword(100);
   // Made once per launch, in an isolate: RSA key generation is too slow for the UI isolate.

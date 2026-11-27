@@ -75,6 +75,8 @@ public class MethodHandler: NSObject, FlutterPlugin {
                         result(FlutterError(code: "INVALID_ARGS", message: nil, details: nil))
                         return
                     }
+                    let debug = (args["debug"] as? NSNumber)?.boolValue ?? (args["debug"] as? Bool) ?? false
+                    FilePath.setDebugMode(debug)
                     VPNConfig.shared.baseDir=baseDir
                     VPNConfig.shared.workingDir=workingDir
                     VPNConfig.shared.tempDir=tempDir
@@ -85,13 +87,14 @@ public class MethodHandler: NSObject, FlutterPlugin {
                     opts.tempDir = tempDir
                     opts.listen = "127.0.0.1:\(grpcPort)"
                     opts.secret = ""
-                    opts.debug = false
+                    opts.debug = debug
                     opts.mode = mode // 1 = mTLS, 3/4 = insecure
                     opts.fixAndroidStack = false
                     MobileSetup(opts,
                         nil,
                         &error
                     )
+                    SharedLogMirror.shared.syncNow()
                     
                     if let error {
                         result(FlutterError(code: String(error.code), message: error.localizedDescription, details: nil))
@@ -126,6 +129,9 @@ public class MethodHandler: NSObject, FlutterPlugin {
                     await mainResult(FlutterError(code: "INVALID_ARGS", message: nil, details: nil))
                     return
                 }
+                if let debug = (args["debug"] as? NSNumber)?.boolValue ?? (args["debug"] as? Bool) {
+                    FilePath.setDebugMode(debug)
+                }
                 VPNConfig.shared.activeConfigPath = path
                 VPNConfig.shared.activeProfileName = name
                 VPNConfig.shared.grpcServiceModePort=grpcPort
@@ -143,7 +149,9 @@ public class MethodHandler: NSObject, FlutterPlugin {
                         grpcServiceModePort: grpcPort,
                         disableMemoryLimit: VPNConfig.shared.disableMemoryLimit
                     )
+                    SharedLogMirror.shared.syncNow()
                 } catch {
+                    SharedLogMirror.shared.syncNow()
                     await mainResult(FlutterError(code: "SETUP_CONNECTION", message: error.localizedDescription, details: nil))
                     return
                 }

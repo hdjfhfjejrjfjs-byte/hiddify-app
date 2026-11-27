@@ -1,8 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/profile/add/phone_import/phone_import_server.dart' show isLocalNetwork;
 import 'package:path/path.dart' as p;
 
@@ -47,10 +46,7 @@ class LanFileServer {
     await _downloads.close();
   }
 
-  static String _newToken() {
-    final random = Random.secure();
-    return base64Url.encode(List.generate(18, (_) => random.nextInt(256)));
-  }
+  static String _newToken() => hiddifyRust.require(hiddifyRust.generateUrlToken(18), 'generateUrlToken');
 
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
@@ -58,7 +54,10 @@ class LanFileServer {
       final remote = request.connectionInfo?.remoteAddress;
       if (remote == null ||
           !isLocalNetwork(remote) ||
-          request.headers.value(HttpHeaders.hostHeader)?.toLowerCase() != url.authority.toLowerCase() ||
+          !hiddifyRust.require(
+            hiddifyRust.isAllowedHostHeader(request.headers.value(HttpHeaders.hostHeader), url.authority),
+            'isAllowedHostHeader',
+          ) ||
           request.uri.pathSegments.firstOrNull != _token) {
         return await _plain(response, HttpStatus.notFound, 'Not found');
       }

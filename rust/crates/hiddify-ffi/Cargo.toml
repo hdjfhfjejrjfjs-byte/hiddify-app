@@ -1,0 +1,21 @@
+[package]
+name = "hiddify-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified panic-safe C-ABI FFI facade exposing Hiddify Rust crates to Dart (dart:ffi), Swift (iOS/macOS), Kotlin/JNI (Android), and C/C++ (Linux)."
+
+[lib]
+name = "hiddify_rust"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+base64.workspace = true
+hiddify-config = { path = "../hiddify-config" }
+hiddify-crypto = { path = "../hiddify-crypto" }
+hiddify-diagnostics = { path = "../hiddify-diagnostics" }
+hiddify-net = { path = "../hiddify-net" }
+hiddify-profile = { path = "../hiddify-profile" }
+indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,4 +1,5 @@
 import 'package:grpc/grpc.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 
 /// Whether a gRPC error only says that the core's end of the channel went away.
 ///
@@ -9,7 +10,5 @@ import 'package:grpc/grpc.dart';
 /// (CONNECT_ERROR). Neither is an error of the app; the stream is armed again on the next start.
 bool isCoreGoneError(Object? error) {
   if (error is! GrpcError) return false;
-  if (error.code == StatusCode.unavailable) return true;
-  return error.code == StatusCode.unknown &&
-      (error.message ?? '').contains('Connection is being forcefully terminated');
+  return hiddifyRust.require(hiddifyRust.isCoreGoneGrpcError(error.code, error.message), 'isCoreGoneGrpcError');
 }

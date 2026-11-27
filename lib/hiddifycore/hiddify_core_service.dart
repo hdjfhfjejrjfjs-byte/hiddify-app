@@ -8,6 +8,7 @@ import 'package:grpc/grpc.dart';
 import 'package:hiddify/core/directories/directories_provider.dart';
 import 'package:hiddify/core/logger/core_logger.dart';
 import 'package:hiddify/core/notification/in_app_notification_controller.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/connection/model/connection_failure.dart';
 import 'package:hiddify/features/log/model/log_level.dart' as config_log_level;
 import 'package:hiddify/features/settings/data/config_option_repository.dart';
@@ -272,20 +273,17 @@ class HiddifyCoreService with InfraLogger {
   /// The failure for a start that ended stopped with an alert.
   ConnectionFailure _startFailure(CoreStopped stopped) {
     final message = stopped.message ?? "";
-    // Go words Windows errors in English, so the two texts below match on every system language.
-    // Windows refuses the TUN adapter to a process that is not elevated.
-    if (message.contains("start inbound/tun[tun-in]: configure tun interface: Access is denied.")) {
-      return const ConnectionFailure.missingPrivilege();
-    }
-    // Another adapter already has the address the core gives its TUN (172.19.0.1).
-    if (message.contains(
-      "start inbound/tun[tun-in]: configure tun interface: set ipv4 address: The object already exists.",
-    )) {
-      return const ConnectionFailure.tunAddressInUse();
-    }
-    final alert = message.contains("denied") ? CoreAlert.requestVPNPermission : stopped.alert;
-    return CoreStatus.stopped(alert: alert, message: message).getCoreAlert() ??
-        ConnectionFailure.unexpected("failed to start core: $message");
+    final kind = hiddifyRust.require(hiddifyRust.classifyCoreStartFailure(message), 'classifyCoreStartFailure');
+    return switch (kind) {
+      'missing_privilege' => const ConnectionFailure.missingPrivilege(),
+      'tun_address_in_use' => const ConnectionFailure.tunAddressInUse(),
+      _ =>
+        CoreStatus.stopped(
+              alert: kind == 'vpn_permission_denied' ? CoreAlert.requestVPNPermission : stopped.alert,
+              message: message,
+            ).getCoreAlert() ??
+            ConnectionFailure.unexpected("failed to start core: $message"),
+    };
   }
 
   TaskEither<String, Unit> stop() {

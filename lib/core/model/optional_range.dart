@@ -1,7 +1,7 @@
 import 'package:dart_mappable/dart_mappable.dart';
-import 'package:dartx/dartx.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:hiddify/core/localization/translations.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 
 part 'optional_range.mapper.dart';
 
@@ -12,22 +12,20 @@ class OptionalRange with OptionalRangeMappable {
   final int? min;
   final int? max;
 
-  String format() => [min, max].whereNotNull().join("-");
+  String format() => hiddifyRust.require(hiddifyRust.formatOptionalRange(min, max), 'formatOptionalRange');
   String present(TranslationsEn t) => format().isEmpty ? t.common.notSet : format();
 
-  factory OptionalRange.parse(String input, {bool allowEmpty = false}) => switch (input.split("-")) {
-    [final String val] when val.isEmpty && allowEmpty => const OptionalRange(),
-    [final String min] => OptionalRange(min: int.parse(min)),
-    [final String min, final String max] => OptionalRange(min: int.parse(min), max: int.parse(max)),
-    _ => throw Exception("Invalid range: $input"),
-  };
+  factory OptionalRange.parse(String input, {bool allowEmpty = false}) {
+    final parsed = tryParse(input, allowEmpty: allowEmpty);
+    if (parsed == null) throw Exception("Invalid range: $input");
+    return parsed;
+  }
 
   static OptionalRange? tryParse(String input, {bool allowEmpty = false}) {
-    try {
-      return OptionalRange.parse(input, allowEmpty: allowEmpty);
-    } catch (_) {
-      return null;
-    }
+    hiddifyRust.ensureAvailable('parseOptionalRange');
+    final parsed = hiddifyRust.parseOptionalRange(input, allowEmpty: allowEmpty);
+    if (parsed == null) return null;
+    return OptionalRange(min: parsed.min, max: parsed.max);
   }
 }
 

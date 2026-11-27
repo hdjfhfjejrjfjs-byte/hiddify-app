@@ -16,6 +16,16 @@ public enum FilePath {
 public extension FilePath {
     static let groupName = "group.\(packageName)"
 
+    private static let debugModeKey = "debug_mode"
+
+    static func setDebugMode(_ enabled: Bool) {
+        UserDefaults(suiteName: FilePath.groupName)?.set(enabled, forKey: debugModeKey)
+    }
+
+    static func isDebugMode() -> Bool {
+        UserDefaults(suiteName: FilePath.groupName)?.bool(forKey: debugModeKey) ?? false
+    }
+
     private static let defaultSharedDirectory: URL! = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: FilePath.groupName)
 
     static let sharedDirectory = defaultSharedDirectory!

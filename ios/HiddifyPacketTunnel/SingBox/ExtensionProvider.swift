@@ -75,7 +75,7 @@ open class ExtensionProvider: NEPacketTunnelProvider {
         setupOptions.tempDir = FilePath.cacheDirectory.relativePath
         setupOptions.listen = "127.0.0.1:\(grpcServiceModePort)"
         setupOptions.secret = ""
-        setupOptions.debug = false
+        setupOptions.debug = (options?["debug"] as? NSNumber)?.boolValue ?? FilePath.isDebugMode()
         setupOptions.mode = useMtls ? 2 : 4 // GRPC_BACKGROUND or GRPC_BACKGROUND_INSECURE
         setupOptions.fixAndroidStack = false
         var setupError: NSError?

@@ -70,6 +70,20 @@ void main() {
     expect(WarpEndpointSource.of(detour: false), WarpEndpointSource.values);
   });
 
+  test('extra security WARP defaults to the auto tunnel (warp_auto)', () async {
+    SharedPreferences.setMockInitialValues({});
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await container.read(sharedPreferencesProvider.future);
+
+    final mode = container.read(ConfigOptions.extraSecurityMode);
+    final tunnel = container.read(ConfigOptions.extraSecurityWarp.tunnel);
+    expect(mode, ChainMode.warp);
+    expect(tunnel, WarpTunnel.auto);
+    expect(mode.coreKey(tunnel), 'warp_auto');
+    expect(container.read(ConfigOptions.unblockerWarp.tunnel), WarpTunnel.auto);
+  });
+
   group('an older clean IP', () {
     test('that was an address becomes the custom endpoint, and stays', () async {
       final preferences = await _migrated({'unblocker-warp-clean-ip': '162.159.192.1'});

@@ -1,12 +1,13 @@
 import 'dart:ffi' show Abi;
 import 'dart:io';
+import 'dart:isolate';
 
-import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hiddify/core/app_info/app_info_provider.dart';
 import 'package:hiddify/core/http_client/http_client_provider.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/app_update/model/install_kind.dart';
 import 'package:hiddify/features/app_update/model/remote_version_entity.dart';
 import 'package:hiddify/features/window/notifier/window_notifier.dart';
@@ -139,7 +140,9 @@ class AppUpdater extends _$AppUpdater with AppLogger {
 
   Future<File> _download(ReleaseAsset asset) async {
     final digest = asset.digest;
-    if (digest == null || digest.length != 71 || !RegExp(r'^sha256:[0-9a-fA-F]{64}$').hasMatch(digest)) {
+    final validDigest =
+        digest != null && hiddifyRust.require(hiddifyRust.isValidSha256Digest(digest), 'isValidSha256Digest');
+    if (!validDigest) {
       throw StateError('${asset.name}: the release has no valid SHA-256 digest; the update was not downloaded.');
     }
     // on Android the cache, which the installer may read (res/xml/update_paths.xml)
@@ -168,20 +171,22 @@ class AppUpdater extends _$AppUpdater with AppLogger {
       throw Exception("${asset.name}: got $length of ${asset.size} bytes");
     }
     // Stream the artifact so verifying an AppImage/APK does not load it all into memory.
-    final actualDigest = await sha256.bind(file.openRead()).first;
+    final verified = await _verifyFileSha256(file.path, 0, digest);
     if (_cancel?.cancelError case final cancellation?) throw cancellation;
-    if (actualDigest.toString() != digest.substring(7).toLowerCase()) {
+    if (!verified) {
       await file.delete();
       throw StateError('${asset.name}: SHA-256 verification failed; the update was not installed.');
     }
     return file;
   }
 
+  static Future<bool> _verifyFileSha256(String path, int expectedSize, String digest) => Isolate.run(
+    () => hiddifyRust.require(hiddifyRust.verifyFileSha256(path, expectedSize, digest), 'verifyFileSha256'),
+  );
+
   static Future<bool> _matches(File file, int size, String digest) async {
     try {
-      if (size > 0 && await file.length() != size) return false;
-      final actual = await sha256.bind(file.openRead()).first;
-      return actual.toString() == digest.substring(7).toLowerCase();
+      return await _verifyFileSha256(file.path, size, digest);
     } on FileSystemException {
       return false;
     }

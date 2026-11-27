@@ -13,6 +13,7 @@ analyzer:
     - "lib/features/profile/details/json_editor.dart"
     # vendored, patched packages (see third_party/*/HIDDIFY.md)
     - "third_party/**"
+    - "archive/**"
     - "build/**"
     - "dist/**"
   errors:

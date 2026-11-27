@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hiddify-crypto",
+    "crates/hiddify-net",
+    "crates/hiddify-config",
+    "crates/hiddify-profile",
+    "crates/hiddify-diagnostics",
+    "crates/hiddify-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/hiddify/hiddify-app"
+
+[workspace.dependencies]
+age = { version = "0.11", default-features = false }
+base64 = "0.22"
+der = { version = "0.7", features = ["pem", "std"] }
+indexmap = { version = "2.6", features = ["serde"] }
+percent-encoding = "2.3"
+rand = "0.8"
+regex = "1.11"
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
+spki = { version = "0.7", features = ["pem", "std"] }
+thiserror = "2.0"
+url = "2.5"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+x509-cert = { version = "0.2", features = ["builder", "pem", "std"] }
+x509-parser = "0.16"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "unwind"

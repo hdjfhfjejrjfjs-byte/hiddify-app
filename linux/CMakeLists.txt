@@ -111,6 +111,11 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
 install(FILES "../hiddify-core/bin/lib/hiddify-core.so" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../rust/dist/linux/libhiddify_rust.so")
+  install(FILES "../rust/dist/linux/libhiddify_rust.so" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
 install(
   FILES "../hiddify-core/bin/HiddifyCli" 
   DESTINATION "${CMAKE_INSTALL_PREFIX}"
