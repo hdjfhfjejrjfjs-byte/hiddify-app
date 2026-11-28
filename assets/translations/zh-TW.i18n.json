@@ -118,6 +118,11 @@
       "switchFailed": "無法切換到此代理。請重試。",
       "notResponding": "無回應",
       "noneResponding": "所有代理均無回應",
+      "searchHint": "搜尋節點名稱、地區或協議…",
+      "noSearchResults": "沒有符合的節點",
+      "clearSearch": "清除搜尋",
+      "offlineTapToConnect": "未連線 · 點選節點自動連線",
+      "connectingToProxy": "正在連線…",
       "sortOptions": {
         "unsorted": "預設",
         "name": "按名稱",
@@ -275,6 +280,9 @@
       "freeSubNotFoundForRegion": "未找到「${region}」地區的免費訂閱",
       "failedToLoad": "載入失敗",
       "updateSubscriptions": "更新訂閱",
+      "nodeCount": "$n 個節點",
+      "viewProxies": "檢視節點列表",
+      "switchProfile": "切換訂閱",
       "share": {
         "title": "分享設定檔",
         "scanHint": "在另一台裝置上用 Hiddify 掃描，即可新增此設定檔",

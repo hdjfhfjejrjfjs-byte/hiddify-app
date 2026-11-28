@@ -118,6 +118,11 @@
       "switchFailed": "Couldn’t switch to this proxy. Try again.",
       "notResponding": "Not responding",
       "noneResponding": "No proxy is responding",
+      "searchHint": "Search by name, region, or protocol…",
+      "noSearchResults": "No matching proxies",
+      "clearSearch": "Clear search",
+      "offlineTapToConnect": "Disconnected · Tap a proxy to connect",
+      "connectingToProxy": "Connecting…",
       "deepSearch": {
         "title": "Keep searching?",
         "message": "${name} looked for a way through (a WARP endpoint or a Psiphon route) for a few minutes and found none. A deep search keeps looking with no time limit. It may take hours and use a lot of battery and CPU.",
@@ -294,6 +299,9 @@
       "freeSubNotFoundForRegion": "No free subscription found for “${region}”",
       "failedToLoad": "Failed to load",
       "updateSubscriptions": "Update subscriptions",
+      "nodeCount": "$n proxies",
+      "viewProxies": "View proxies",
+      "switchProfile": "Switch profile",
       "share": {
         "title": "Share profile",
         "scanHint": "Scan it with Hiddify on another device to add this profile",

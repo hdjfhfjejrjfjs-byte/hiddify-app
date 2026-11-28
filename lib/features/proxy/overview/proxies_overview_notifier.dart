@@ -8,7 +8,10 @@ import 'package:hiddify/core/localization/translations.dart';
 import 'package:hiddify/core/notification/in_app_notification_controller.dart';
 import 'package:hiddify/core/preferences/preferences_provider.dart';
 import 'package:hiddify/core/utils/preferences_utils.dart';
+import 'package:hiddify/features/connection/model/connection_status.dart';
 import 'package:hiddify/features/connection/notifier/connection_notifier.dart';
+import 'package:hiddify/features/profile/model/profile_entity.dart';
+import 'package:hiddify/features/profile/notifier/active_profile_notifier.dart';
 import 'package:hiddify/features/proxy/data/proxy_data_providers.dart';
 import 'package:hiddify/features/proxy/widget/upload_speed.dart';
 import 'package:hiddify/features/settings/data/config_option_repository.dart';
@@ -17,6 +20,7 @@ import 'package:hiddify/hiddifycore/init_signal.dart';
 import 'package:hiddify/singbox/model/singbox_config_enum.dart';
 import 'package:hiddify/utils/riverpod_utils.dart';
 import 'package:hiddify/utils/utils.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:rxdart/rxdart.dart';
 
@@ -88,11 +92,66 @@ class ProxyPingStyleNotifier extends _$ProxyPingStyleNotifier {
   Future<void> toggle() => update(state == ProxyPingStyle.number ? ProxyPingStyle.signal : ProxyPingStyle.number);
 }
 
+/// The proxy the user tapped while disconnected (or before the core streamed the proxy list),
+/// waiting to be selected once the core connects for the same profile.
+@Riverpod(keepAlive: true)
+class PendingProxySelection extends _$PendingProxySelection {
+  ProviderSubscription<AsyncValue<ProfileEntity?>>? _profileSub;
+  ProviderSubscription<AsyncValue<ConnectionStatus>>? _connectionSub;
+
+  @override
+  ({String profileId, String outboundTag})? build() {
+    ref.onDispose(() {
+      _profileSub?.close();
+      _profileSub = null;
+      _connectionSub?.close();
+      _connectionSub = null;
+    });
+    return null;
+  }
+
+  void set({required String profileId, required String outboundTag}) {
+    state = (profileId: profileId, outboundTag: outboundTag);
+    _ensureLifecycleListeners();
+  }
+
+  void clear() {
+    if (state != null) state = null;
+  }
+
+  void _ensureLifecycleListeners() {
+    _profileSub ??= ref.listen(activeProfileProvider, (_, next) {
+      final current = state;
+      if (current == null) return;
+      if (next.isLoading && !next.hasValue) return;
+      if (next.valueOrNull?.id != current.profileId) {
+        clear();
+      }
+    });
+    _connectionSub ??= ref.listen(connectionNotifierProvider, (previous, next) {
+      if (state == null) return;
+      if (next.hasError) {
+        clear();
+        return;
+      }
+      if (previous?.valueOrNull case final prev? when prev is! Disconnected) {
+        if (next.valueOrNull is Disconnected) {
+          clear();
+        }
+      }
+    });
+  }
+}
+
 @riverpod
 class ProxiesOverviewNotifier extends _$ProxiesOverviewNotifier with AppLogger {
   @override
   Stream<OutboundGroup?> build() {
     ref.disposeDelay(const Duration(seconds: 15));
+    listenSelf((_, next) {
+      final group = next.valueOrNull;
+      if (group != null) _applyPendingSelection(group);
+    });
     final serviceRunning = ref.watch(serviceRunningProvider);
     // Set up again when the app comes back from the background, on a new gRPC
     // channel; the stream below lives on the old one.
@@ -265,10 +324,42 @@ class ProxiesOverviewNotifier extends _$ProxiesOverviewNotifier with AppLogger {
   //   }
   // }
 
+  void _applyPendingSelection(OutboundGroup group) {
+    final pending = ref.read(pendingProxySelectionProvider);
+    if (pending == null) return;
+    final activeProfileId = ref.read(activeProfileProvider).valueOrNull?.id;
+    if (activeProfileId != pending.profileId) return;
+    if (!group.items.any((e) => e.tag == pending.outboundTag)) return;
+
+    ref.read(pendingProxySelectionProvider.notifier).clear();
+    if (group.selected != pending.outboundTag) {
+      unawaited(changeProxy(group.tag, pending.outboundTag));
+    }
+  }
+
+  /// Selects [outboundTag] immediately when connected with a live proxy group; otherwise records
+  /// it as pending for the active profile and starts connecting so it is selected once ready.
+  Future<void> connectAndSelectProxy(String outboundTag) async {
+    if (ref.read(serviceRunningProvider)) {
+      final group = state.valueOrNull;
+      if (group != null) {
+        if (ref.read(pendingProxySelectionProvider) != null) {
+          ref.read(pendingProxySelectionProvider.notifier).clear();
+        }
+        await changeProxy(group.tag, outboundTag);
+        return;
+      }
+    }
+    final activeProfile = ref.read(activeProfileProvider).valueOrNull;
+    if (activeProfile == null) return;
+    ref.read(pendingProxySelectionProvider.notifier).set(profileId: activeProfile.id, outboundTag: outboundTag);
+    await ref.read(connectionNotifierProvider.notifier).mayConnect();
+  }
+
   Future<void> changeProxy(String groupTag, String outboundTag) async {
     loggy.debug("changing proxy, group: [$groupTag] - outbound: [$outboundTag]");
-    if (!state.hasValue) return;
-    final outbounds = state.value!;
+    final outbounds = state.valueOrNull;
+    if (outbounds == null) return;
     await ref.read(hapticServiceProvider.notifier).lightImpact();
     final selected = await ref
         .read(proxyRepositoryProvider)
@@ -296,6 +387,7 @@ class ProxiesOverviewNotifier extends _$ProxiesOverviewNotifier with AppLogger {
   /// Tests the upload speed of [tag], a proxy, or each proxy of a group, sending the megabytes the
   /// settings name through each.
   Future<void> uploadTest(String tag) async {
+    if (!ref.read(serviceRunningProvider)) return;
     final bytes = uploadTestBytes(ref);
     await ref.read(hapticServiceProvider.notifier).lightImpact();
     await ref.read(proxyRepositoryProvider).uploadTest(tag, bytes).getOrElse((err) {
@@ -309,6 +401,7 @@ class ProxiesOverviewNotifier extends _$ProxiesOverviewNotifier with AppLogger {
   /// Tests the download speed of [tag], a proxy, or each proxy of a group, receiving the megabytes
   /// the settings name through each.
   Future<void> downloadTest(String tag) async {
+    if (!ref.read(serviceRunningProvider)) return;
     final bytes = uploadTestBytes(ref);
     await ref.read(hapticServiceProvider.notifier).lightImpact();
     await ref.read(proxyRepositoryProvider).downloadTest(tag, bytes).getOrElse((err) {
@@ -358,7 +451,7 @@ class ProxiesOverviewNotifier extends _$ProxiesOverviewNotifier with AppLogger {
   /// Tests the proxies [tags], a few at a time: also the ones keep top left at rest, each loaded
   /// for its test and left at rest after it.
   Future<void> urlTestProxies(List<String> tags) async {
-    if (tags.isEmpty) return;
+    if (tags.isEmpty || !ref.read(serviceRunningProvider)) return;
     loggy.debug("testing ${tags.length} proxies");
     if (state case AsyncData()) {
       await ref.read(hapticServiceProvider.notifier).lightImpact();
@@ -371,6 +464,7 @@ class ProxiesOverviewNotifier extends _$ProxiesOverviewNotifier with AppLogger {
 
   /// Tests [groupTag]'s proxies, or only the one proxy when given a proxy's tag (a tap on its ping).
   Future<void> urlTest(String groupTag) async {
+    if (!ref.read(serviceRunningProvider)) return;
     loggy.debug("testing group: [$groupTag]");
     if (state case AsyncData()) {
       await ref.read(hapticServiceProvider.notifier).lightImpact();

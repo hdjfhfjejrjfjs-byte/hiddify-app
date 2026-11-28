@@ -635,6 +635,8 @@ class _FlagSlot extends StatelessWidget {
           child: Opacity(opacity: .35, child: flag),
         ),
       ),
+      // offline / tag-derived country code (no IP looked up yet): show the flag calmly without shimmer
+      _ when ip.countryCode.isNotEmpty && !gaveUp => ('country', flag),
       _ when gaveUp => ('empty', _square(s.onSurface.withValues(alpha: .07))),
       _ when still => ('bone', _square(s.onSurface.withValues(alpha: .12))),
       _ => (

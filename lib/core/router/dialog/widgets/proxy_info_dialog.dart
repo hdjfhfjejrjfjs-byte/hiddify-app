@@ -124,7 +124,7 @@ class ProxyInfoDialog extends ConsumerWidget with PresLogger {
     final t = ref.watch(translationsProvider).requireValue;
     // the proxy as the core reports it now, so a test's result shows: from the proxies list, or, for
     // the home card's server and chain hop, which that list may not hold, from the main list
-    final proxy =
+    final liveProxy =
         ref.watch(
           proxiesOverviewNotifierProvider.select(
             (list) => list.valueOrNull?.items.where((e) => e.tag == outboundInfo.tag).firstOrNull,
@@ -137,8 +137,8 @@ class ProxyInfoDialog extends ConsumerWidget with PresLogger {
             if (main.hasChainHop() && main.chainHop.tag == outboundInfo.tag) return main.chainHop;
             return main.items.expand((group) => group.items).where((e) => e.tag == outboundInfo.tag).firstOrNull;
           }),
-        ) ??
-        outboundInfo;
+        );
+    final proxy = liveProxy ?? outboundInfo;
     return AlertDialog(
       titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
       contentPadding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
@@ -150,7 +150,7 @@ class ProxyInfoDialog extends ConsumerWidget with PresLogger {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              OutboundInfoWidget(outboundInfo: proxy),
+              OutboundInfoWidget(outboundInfo: proxy, canTest: liveProxy != null),
               _PsiphonCountry(proxy),
               if (_canShare(proxy)) _KeepLoaded(proxy),
             ],
@@ -334,9 +334,10 @@ class _Chip extends StatelessWidget {
 
 /// Why the proxy failed, when the core says, then where it leads, then its speeds.
 class OutboundInfoWidget extends ConsumerWidget {
-  const OutboundInfoWidget({super.key, required this.outboundInfo});
+  const OutboundInfoWidget({super.key, required this.outboundInfo, this.canTest = true});
 
   final OutboundInfo outboundInfo;
+  final bool canTest;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -385,7 +386,7 @@ class OutboundInfoWidget extends ConsumerWidget {
           ),
         ),
         const Gap(8),
-        _Speeds(proxy),
+        _Speeds(proxy, canTest: canTest),
       ],
     );
   }
@@ -483,9 +484,10 @@ class _InfoRow extends StatelessWidget {
 /// Ping, upload and download, side by side; a tap on one tests it, a long press on a speed sets how
 /// much its test moves. A group's speeds are those of the proxy it uses, tested from that proxy.
 class _Speeds extends ConsumerWidget {
-  const _Speeds(this.proxy);
+  const _Speeds(this.proxy, {required this.canTest});
 
   final OutboundInfo proxy;
+  final bool canTest;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -504,6 +506,7 @@ class _Speeds extends ConsumerWidget {
 
     Widget speed({required bool download}) {
       final value = (download ? proxy.downloadSpeed : proxy.uploadSpeed).toInt();
+      final speedTestable = canTest && !proxy.isGroup;
       return _SpeedTile(
         icon: download ? FluentIcons.arrow_download_24_regular : FluentIcons.arrow_upload_24_regular,
         label: download ? info.download : info.upload,
@@ -513,11 +516,11 @@ class _Speeds extends ConsumerWidget {
         failed: value < 0,
         cached: download ? proxy.downloadSpeedCached : proxy.uploadSpeedCached,
         testing: download ? proxy.downloadTesting : proxy.uploadTesting,
-        hint: proxy.isGroup ? null : info.tapToTest,
-        onTap: proxy.isGroup
-            ? null
-            : () => download ? notifier.downloadTest(proxy.tag) : notifier.uploadTest(proxy.tag),
-        onLongPress: () => chooseUploadTestSize(ref),
+        hint: speedTestable ? info.tapToTest : null,
+        onTap: speedTestable
+            ? () => download ? notifier.downloadTest(proxy.tag) : notifier.uploadTest(proxy.tag)
+            : null,
+        onLongPress: canTest ? () => chooseUploadTestSize(ref) : null,
       );
     }
 
@@ -532,8 +535,8 @@ class _Speeds extends ConsumerWidget {
             color: pingColor,
             failed: delay >= 65000 && !pingCached,
             cached: pingCached,
-            hint: info.tapToTest,
-            onTap: () => notifier.urlTest(proxy.tag),
+            hint: canTest ? info.tapToTest : null,
+            onTap: canTest ? () => notifier.urlTest(proxy.tag) : null,
           ),
         ),
         const Gap(8),

@@ -8,14 +8,13 @@ import 'package:hiddify/core/model/constants.dart';
 import 'package:hiddify/core/model/failures.dart';
 import 'package:hiddify/core/model/trusted_links.dart';
 import 'package:hiddify/core/notification/in_app_notification_controller.dart';
-import 'package:hiddify/core/router/bottom_sheets/bottom_sheets_notifier.dart';
 import 'package:hiddify/core/router/dialog/dialog_notifier.dart';
-import 'package:hiddify/core/router/go_router/helper/active_breakpoint_notifier.dart';
 import 'package:hiddify/core/widget/adaptive_icon.dart';
 import 'package:hiddify/core/widget/adaptive_menu.dart';
 import 'package:hiddify/features/profile/model/profile_entity.dart';
 import 'package:hiddify/features/profile/notifier/profile_notifier.dart';
 import 'package:hiddify/features/profile/overview/profiles_notifier.dart';
+import 'package:hiddify/features/proxy/keep_top/keep_top.dart';
 import 'package:hiddify/gen/fonts.gen.dart';
 import 'package:hiddify/utils/utils.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -39,10 +38,9 @@ class ProfileTile extends HookConsumerWidget {
       initialOnFailure: (err) {
         ref.read(inAppNotificationControllerProvider).showErrorToast(t.presentShortError(err));
       },
-      initialOnSuccess: () {
-        if (context.mounted && context.canPop()) context.pop();
-      },
     );
+
+    final proxyCount = isMain ? ref.watch(profileProxyCountProvider(profile.id)).valueOrNull : null;
 
     final subInfo = switch (profile) {
       RemoteProfileEntity(:final subInfo) => subInfo,
@@ -53,17 +51,15 @@ class ProfileTile extends HookConsumerWidget {
 
     void handleTap() {
       if (isMain) {
-        if (Breakpoint(context).isMobile()) {
-          ref.read(bottomSheetsNotifierProvider.notifier).showProfilesOverview();
-        } else {
-          context.goNamed('profiles');
-        }
+        context.goNamed('proxies');
         return;
       }
       if (selectActiveMutation.state.isInProgress) return;
       selectActiveMutation.setFuture(ref.read(profilesNotifierProvider.notifier).selectActiveProfile(profile.id));
-      if (context.canPop()) {
-        context.pop();
+      if (Navigator.of(context).canPop()) {
+        if (ModalRoute.of(context)?.isCurrent ?? true) {
+          Navigator.of(context).pop();
+        }
       } else {
         context.goNamed('home');
       }
@@ -101,7 +97,7 @@ class ProfileTile extends HookConsumerWidget {
                 ),
                 if (profile.active) VerticalDivider(width: 1, color: theme.colorScheme.outline) else const Gap(1),
               ],
-              Expanded(child: _body(context, t, theme, subInfo, showActionButton, handleTap, showLinks)),
+              Expanded(child: _body(context, t, theme, subInfo, showActionButton, handleTap, showLinks, proxyCount)),
             ],
           ),
         ),
@@ -122,8 +118,8 @@ class ProfileTile extends HookConsumerWidget {
     );
   }
 
-  /// The tappable content: the profile name (wrapped with a dropdown
-  /// affordance on the main card) followed by the subscription info.
+  /// The tappable content: the profile name (with node count and chevron on
+  /// the main card) followed by the subscription info.
   Widget _body(
     BuildContext context,
     TranslationsEn t,
@@ -132,6 +128,7 @@ class ProfileTile extends HookConsumerWidget {
     bool showActionButton,
     VoidCallback onTap,
     bool squareBottom,
+    int? proxyCount,
   ) {
     return Semantics(
       button: true,
@@ -139,7 +136,7 @@ class ProfileTile extends HookConsumerWidget {
       focused: isMain,
       liveRegion: isMain,
       namesRoute: isMain,
-      label: isMain ? t.pages.profiles.viewAllProfiles : null,
+      label: isMain ? t.pages.profiles.viewProxies : null,
       child: InkWell(
         borderRadius: showActionButton
             ? ProfileTileConst.endBorderRadius(Directionality.of(context), squareBottom: squareBottom)
@@ -151,7 +148,7 @@ class ProfileTile extends HookConsumerWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _title(t, theme),
+              _title(t, theme, proxyCount),
               if (subInfo != null) ...[
                 const Gap(4),
                 RemainingTrafficIndicator(subInfo.ratio),
@@ -166,9 +163,9 @@ class ProfileTile extends HookConsumerWidget {
     );
   }
 
-  /// Profile name with a trailing affordance: a dropdown on the main card, or a
-  /// pin badge on list rows when the profile is pinned.
-  Widget _title(TranslationsEn t, ThemeData theme) {
+  /// Profile name with a trailing affordance: node count and chevron on the
+  /// main card, or a pin badge on list rows when the profile is pinned.
+  Widget _title(TranslationsEn t, ThemeData theme, int? proxyCount) {
     final nameText = Text(
       profile.name,
       maxLines: 2,
@@ -180,7 +177,7 @@ class ProfileTile extends HookConsumerWidget {
     );
 
     final Widget? trailing = isMain
-        ? const Icon(Icons.arrow_drop_down_rounded)
+        ? _mainTrailing(t, theme, proxyCount)
         : profile.pinned
         ? Icon(Icons.push_pin, size: 16, color: theme.colorScheme.onSurfaceVariant)
         : null;
@@ -197,6 +194,27 @@ class ProfileTile extends HookConsumerWidget {
 
     // On the main card the title is wrapped so it reads as a single affordance.
     return Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: row);
+  }
+
+  Widget _mainTrailing(TranslationsEn t, ThemeData theme, int? proxyCount) {
+    final chevron = Icon(Icons.chevron_right_rounded, size: 20, color: theme.colorScheme.onSurfaceVariant);
+    if (proxyCount == null || proxyCount <= 0) return chevron;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 112),
+          child: Text(
+            t.pages.profiles.nodeCount(n: proxyCount),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ),
+        const Gap(2),
+        chevron,
+      ],
+    );
   }
 }
 
@@ -386,7 +404,9 @@ class ProfileActionsMenu extends HookConsumerWidget {
         leadingIcon: const Icon(Icons.edit_rounded),
         title: t.common.edit,
         onTap: () {
-          if (Breakpoint(context).isMobile()) context.pop();
+          if (Navigator.of(context).canPop() && (ModalRoute.of(context)?.isCurrent ?? true)) {
+            Navigator.of(context).pop();
+          }
           context.goNamed('profileDetails', pathParameters: {'id': profile.id});
         },
       ),

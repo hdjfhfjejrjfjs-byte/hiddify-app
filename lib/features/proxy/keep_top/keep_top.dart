@@ -215,11 +215,12 @@ class KeepTopNotifier extends _$KeepTopNotifier with AppLogger {
   /// answer; one already running stays chosen. Nothing changes when the dialog is dismissed.
   Future<void> choose(ProfileEntity profile, int count) async {
     final current = profile.keepTop;
+    final fallback = keepTopDefault < count ? keepTopDefault : -1;
     final choice = await ref
         .read(dialogNotifierProvider.notifier)
         .showKeepTop(
           count: count,
-          keep: current == keepTopAnswering || (current > 0 && current < count) ? current : keepTopDefault,
+          keep: current == keepTopAnswering || (current > 0 && current < count) ? current : fallback,
           quick: profile.userOverride?.keepTopQuick ?? true,
           countries: profile.userOverride?.keepTopCountries ?? const [],
           available: await countries(profile),

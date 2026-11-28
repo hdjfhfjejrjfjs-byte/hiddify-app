@@ -118,6 +118,11 @@
       "switchFailed": "无法切换到此代理。请重试。",
       "notResponding": "无响应",
       "noneResponding": "所有代理均无响应",
+      "searchHint": "搜索节点名称、地区或协议…",
+      "noSearchResults": "没有匹配的节点",
+      "clearSearch": "清除搜索",
+      "offlineTapToConnect": "未连接 · 点选节点自动连接",
+      "connectingToProxy": "正在连接…",
       "sortOptions": {
         "unsorted": "默认",
         "name": "按名称",
@@ -275,6 +280,9 @@
       "freeSubNotFoundForRegion": "未找到“${region}”地区的免费订阅",
       "failedToLoad": "加载失败",
       "updateSubscriptions": "更新订阅",
+      "nodeCount": "$n 个节点",
+      "viewProxies": "查看节点列表",
+      "switchProfile": "切换订阅",
       "share": {
         "title": "分享配置文件",
         "scanHint": "在另一台设备上用 Hiddify 扫描，即可添加此配置文件",
