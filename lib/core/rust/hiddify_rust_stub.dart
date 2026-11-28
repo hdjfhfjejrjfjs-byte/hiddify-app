@@ -277,4 +277,14 @@ class HiddifyRustNative {
     int timeoutMs = 15000,
     int cancelTaskId = 0,
   }) => null;
+
+  String? parseTvImportCode(String scanned) => null;
+  String? sendLinkToTv(String scanned, String link) => null;
+  ({String status, int handle, String secret, int port, String? message})? appImageServiceStart({
+    required String appImagePath,
+    required int ownerPid,
+  }) => null;
+  bool? appImageServiceIsRunning(int handle) => null;
+  bool? appImageServiceStop(int handle) => null;
+  Map<String, dynamic>? runSpeedtest(Map<String, dynamic> options) => null;
 }

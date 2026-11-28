@@ -19,7 +19,7 @@ use hiddify_profile::download::DownloadProblemKind;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-const ABI_VERSION: u32 = 5;
+const ABI_VERSION: u32 = 6;
 
 unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
@@ -1714,6 +1714,65 @@ pub unsafe extern "C" fn hiddify_profile_expand_links_native_json(
     })
 }
 
+// ============================================================================
+// Phase 6 (C-ABI v6): Phone-to-TV Client, Linux AppImage Service & Speedtest
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_parse_tv_import_code(scanned: *const c_char) -> *mut c_char {
+    ffi_string(|| {
+        let raw = cstr_to_str(scanned)?;
+        let target = hiddify_net::lan_server::parse_tv_import_code(raw)?;
+        Some(target.normalized_url)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_send_link_to_tv(
+    scanned: *const c_char,
+    link: *const c_char,
+) -> *mut c_char {
+    ffi_string(|| {
+        let s = cstr_to_str(scanned)?;
+        let l = cstr_to_str(link)?;
+        let outcome = hiddify_net::lan_server::send_link_to_tv(s, l);
+        Some(outcome.as_str().to_string())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_appimage_service_start_json(
+    appimage_path: *const c_char,
+    owner_pid: i32,
+) -> *mut c_char {
+    ffi_string(|| {
+        let path = cstr_to_str(appimage_path)?;
+        let out = hiddify_net::admin_service::appimage_service_start(path, owner_pid);
+        serde_json::to_string(&out).ok()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_appimage_service_is_running(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::admin_service::appimage_service_is_running(handle)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_appimage_service_stop(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::admin_service::appimage_service_stop(handle)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_speedtest_json(request_json: *const c_char) -> *mut c_char {
+    use hiddify_net::speedtest::{run_speedtest, SpeedtestOptions};
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let opts: SpeedtestOptions = serde_json::from_str(req_str).ok()?;
+        let report = run_speedtest(&opts);
+        serde_json::to_string(&report).ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1721,7 +1780,7 @@ mod tests {
 
     #[test]
     fn ffi_roundtrip_and_memory_release() {
-        assert_eq!(hiddify_rust_abi_version(), 5);
+        assert_eq!(hiddify_rust_abi_version(), 6);
 
         let ip = CString::new("1.2.3.4").unwrap();
         let masked_ptr = unsafe { hiddify_net_obscure_ip(ip.as_ptr()) };

@@ -1402,6 +1402,403 @@ fn run_elevated(
     }
 }
 
+// ============================================================================
+// 5. Linux AppImage Root Foreground Service Lifecycle (`appimage_service.dart`)
+// ============================================================================
+
+pub const APPIMAGE_SERVICE_PORT: u16 = 18021;
+const APPIMAGE_READY_LINE: &str = "HIDDIFY_SERVICE_READY";
+const APPIMAGE_ERROR_PREFIX: &str = "HIDDIFY_CORE_ERROR ";
+const APPIMAGE_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const APPIMAGE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppImageServiceStartOutcome {
+    /// `"ok"`, `"no_admin_prompt"`, `"no_admin_agent"`, `"permission_refused"`,
+    /// `"core_error"`, or `"service_error"`.
+    pub status: String,
+    pub handle: u64,
+    pub secret: String,
+    pub port: u16,
+    pub message: Option<String>,
+}
+
+struct AppImageServiceEntry {
+    child: Mutex<std::process::Child>,
+    stdin: Mutex<Option<std::process::ChildStdin>>,
+    exited: std::sync::atomic::AtomicBool,
+}
+
+fn appimage_services() -> &'static Mutex<std::collections::HashMap<u64, std::sync::Arc<AppImageServiceEntry>>> {
+    static MAP: OnceLock<Mutex<std::collections::HashMap<u64, std::sync::Arc<AppImageServiceEntry>>>> =
+        OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn generate_appimage_secret() -> String {
+    use rand::distributions::Uniform;
+    use rand::rngs::OsRng;
+    use rand::Rng;
+
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let dist = Uniform::from(0..CHARS.len());
+    let mut rng = OsRng;
+    (0..64).map(|_| CHARS[rng.sample(dist)] as char).collect()
+}
+
+/// Classifies an early exit of the `pkexec` / `sudo` AppImage VPN service before `HIDDIFY_SERVICE_READY`,
+/// matching lines 88-100 of `appimage_service.dart` 100%.
+pub fn classify_appimage_early_exit(via_sudo: bool, code: i32, stderr_raw: &str) -> (&'static str, String) {
+    let detail = stderr_raw.trim();
+    if via_sudo && detail.contains("a password is required") {
+        return ("no_admin_prompt", ERR_NO_ADMIN_PROMPT_MSG.to_string());
+    }
+    if !via_sudo && detail.contains("textual authentication agent") {
+        return ("no_admin_agent", ERR_NO_ADMIN_AGENT_MSG.to_string());
+    }
+    let refused = if via_sudo {
+        code == 1
+            && (detail.contains("no password was provided")
+                || detail.contains("incorrect password"))
+    } else {
+        code == 126 || (code == 127 && detail.is_empty())
+    };
+    if refused {
+        return (
+            "permission_refused",
+            ERR_ADMIN_PROMPT_REFUSED_MSG.to_string(),
+        );
+    }
+    (
+        "service_error",
+        format!("The VPN service did not start ({code}): {detail}"),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn appimage_service_start(appimage_path: &str, owner_pid: i32) -> AppImageServiceStartOutcome {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+
+    let base_args = vec![
+        appimage_path.to_string(),
+        "HiddifyCli".to_string(),
+        "core-service".to_string(),
+        "--listen".to_string(),
+        format!("127.0.0.1:{APPIMAGE_SERVICE_PORT}"),
+        "--owner-pid".to_string(),
+        owner_pid.to_string(),
+    ];
+
+    let mut via_sudo = false;
+    let mut cleanup_dir: Option<PathBuf> = None;
+    let mut cmd = if look_path("pkexec").is_some() {
+        let mut c = Command::new("pkexec");
+        c.args(&base_args);
+        c
+    } else {
+        if look_path("sudo").is_none() {
+            return AppImageServiceStartOutcome {
+                status: "no_admin_prompt".to_string(),
+                handle: 0,
+                secret: String::new(),
+                port: APPIMAGE_SERVICE_PORT,
+                message: Some(ERR_NO_ADMIN_PROMPT_MSG.to_string()),
+            };
+        }
+        via_sudo = true;
+        let (askpass, dir_opt) = match sudo_askpass() {
+            Ok(pair) => pair,
+            Err(err) => {
+                return AppImageServiceStartOutcome {
+                    status: "service_error".to_string(),
+                    handle: 0,
+                    secret: String::new(),
+                    port: APPIMAGE_SERVICE_PORT,
+                    message: Some(err.message().to_string()),
+                };
+            }
+        };
+        cleanup_dir = dir_opt;
+        if askpass.is_empty() {
+            let mut c = Command::new("sudo");
+            c.arg("-n").args(&base_args);
+            c
+        } else {
+            let mut c = Command::new("sudo");
+            c.arg("-A")
+                .args(&base_args)
+                .env("SUDO_ASKPASS", &askpass);
+            c
+        }
+    };
+
+    struct AskpassCleanup(Option<PathBuf>);
+    impl Drop for AskpassCleanup {
+        fn drop(&mut self) {
+            if let Some(ref d) = self.0 {
+                let _ = fs::remove_dir_all(d);
+            }
+        }
+    }
+    let _askpass_guard = AskpassCleanup(cleanup_dir);
+
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return AppImageServiceStartOutcome {
+                status: "service_error".to_string(),
+                handle: 0,
+                secret: String::new(),
+                port: APPIMAGE_SERVICE_PORT,
+                message: Some(format!("could not spawn AppImage VPN service: {e}")),
+            };
+        }
+    };
+
+    let secret = generate_appimage_secret();
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return AppImageServiceStartOutcome {
+                status: "service_error".to_string(),
+                handle: 0,
+                secret: String::new(),
+                port: APPIMAGE_SERVICE_PORT,
+                message: Some("missing child stdin pipe".to_string()),
+            };
+        }
+    };
+
+    if writeln!(stdin, "{secret}").is_err() || stdin.flush().is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return AppImageServiceStartOutcome {
+            status: "service_error".to_string(),
+            handle: 0,
+            secret: String::new(),
+            port: APPIMAGE_SERVICE_PORT,
+            message: Some("failed writing control secret to service stdin".to_string()),
+        };
+    }
+
+    enum HandshakeSignal {
+        Ready,
+        CoreError(String),
+        StdoutClosed,
+    }
+
+    let (tx, rx) = mpsc::channel::<HandshakeSignal>();
+    if let Some(stdout) = child.stdout.take() {
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            let mut sent_terminal = false;
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if !sent_terminal && trimmed == APPIMAGE_READY_LINE {
+                    sent_terminal = true;
+                    let _ = tx.send(HandshakeSignal::Ready);
+                } else if !sent_terminal && line.starts_with(APPIMAGE_ERROR_PREFIX) {
+                    sent_terminal = true;
+                    let _ = tx.send(HandshakeSignal::CoreError(
+                        line[APPIMAGE_ERROR_PREFIX.len()..].to_string(),
+                    ));
+                }
+            }
+            if !sent_terminal {
+                let _ = tx.send(HandshakeSignal::StdoutClosed);
+            }
+        });
+    }
+
+    let stderr_buf = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sb = stderr_buf.clone();
+        thread::spawn(move || {
+            let mut r = stderr;
+            let mut tmp = [0u8; 2048];
+            while let Ok(n) = r.read(&mut tmp) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut s) = sb.lock() {
+                    if s.len() < 16 * 1024 {
+                        s.push_str(&String::from_utf8_lossy(&tmp[..n]));
+                    }
+                }
+            }
+        });
+    }
+
+    let deadline = Instant::now() + APPIMAGE_READY_TIMEOUT;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return AppImageServiceStartOutcome {
+                status: "service_error".to_string(),
+                handle: 0,
+                secret: String::new(),
+                port: APPIMAGE_SERVICE_PORT,
+                message: Some("Timed out waiting for AppImage VPN service".to_string()),
+            };
+        }
+
+        let wait_step = (deadline - now).min(Duration::from_millis(50));
+        match rx.recv_timeout(wait_step) {
+            Ok(HandshakeSignal::Ready) => {
+                static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+                let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+                let entry = Arc::new(AppImageServiceEntry {
+                    child: Mutex::new(child),
+                    stdin: Mutex::new(Some(stdin)),
+                    exited: AtomicBool::new(false),
+                });
+                if let Ok(mut map) = appimage_services().lock() {
+                    map.insert(handle, entry);
+                }
+                return AppImageServiceStartOutcome {
+                    status: "ok".to_string(),
+                    handle,
+                    secret,
+                    port: APPIMAGE_SERVICE_PORT,
+                    message: None,
+                };
+            }
+            Ok(HandshakeSignal::CoreError(msg)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return AppImageServiceStartOutcome {
+                    status: "core_error".to_string(),
+                    handle: 0,
+                    secret: String::new(),
+                    port: APPIMAGE_SERVICE_PORT,
+                    message: Some(msg),
+                };
+            }
+            Ok(HandshakeSignal::StdoutClosed) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let code = child
+                    .wait()
+                    .ok()
+                    .and_then(|st| st.code())
+                    .unwrap_or(1);
+                // Give stderr reader a brief moment to flush final message
+                thread::sleep(Duration::from_millis(20));
+                let detail = stderr_buf.lock().map(|s| s.clone()).unwrap_or_default();
+                let (status, msg) = classify_appimage_early_exit(via_sudo, code, &detail);
+                return AppImageServiceStartOutcome {
+                    status: status.to_string(),
+                    handle: 0,
+                    secret: String::new(),
+                    port: APPIMAGE_SERVICE_PORT,
+                    message: Some(msg),
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(Some(exit_status)) = child.try_wait() {
+                    let code = exit_status.code().unwrap_or(1);
+                    thread::sleep(Duration::from_millis(20));
+                    let detail = stderr_buf.lock().map(|s| s.clone()).unwrap_or_default();
+                    let (status, msg) = classify_appimage_early_exit(via_sudo, code, &detail);
+                    return AppImageServiceStartOutcome {
+                        status: status.to_string(),
+                        handle: 0,
+                        secret: String::new(),
+                        port: APPIMAGE_SERVICE_PORT,
+                        message: Some(msg),
+                    };
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn appimage_service_start(_appimage_path: &str, _owner_pid: i32) -> AppImageServiceStartOutcome {
+    AppImageServiceStartOutcome {
+        status: "service_error".to_string(),
+        handle: 0,
+        secret: String::new(),
+        port: APPIMAGE_SERVICE_PORT,
+        message: Some("AppImageService is only supported on Linux".to_string()),
+    }
+}
+
+pub fn appimage_service_is_running(handle: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(entry) = appimage_services()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&handle).cloned())
+    else {
+        return false;
+    };
+    if entry.exited.load(Ordering::Acquire) {
+        return false;
+    }
+    if let Ok(mut child) = entry.child.lock() {
+        if let Ok(Some(_)) = child.try_wait() {
+            entry.exited.store(true, Ordering::Release);
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+pub fn appimage_service_stop(handle: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(entry) = appimage_services()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&handle))
+    else {
+        return false;
+    };
+    if entry.exited.load(Ordering::Acquire) {
+        return true;
+    }
+    // Closing stdin tells `HiddifyCli core-service` to restore TUN/routes and exit cleanly
+    if let Ok(mut stdin_opt) = entry.stdin.lock() {
+        drop(stdin_opt.take());
+    }
+    let deadline = Instant::now() + APPIMAGE_STOP_TIMEOUT;
+    if let Ok(mut child) = entry.child.lock() {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    entry.exited.store(true, Ordering::Release);
+                    return true;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        entry.exited.store(true, Ordering::Release);
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => {
+                    entry.exited.store(true, Ordering::Release);
+                    return true;
+                }
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,5 +1892,37 @@ mod tests {
         assert!(is_permission_denied_message("Request dismissed by Polkit"));
         assert!(!is_permission_denied_message(ERR_NO_ADMIN_PROMPT_MSG));
         assert!(!is_permission_denied_message(ERR_NO_ADMIN_AGENT_MSG));
+
+        // AppImage early-exit classifier (`appimage_service.dart` parity)
+        assert_eq!(
+            classify_appimage_early_exit(false, 126, "").0,
+            "permission_refused"
+        );
+        assert_eq!(
+            classify_appimage_early_exit(false, 127, "").0,
+            "permission_refused"
+        );
+        assert_eq!(
+            classify_appimage_early_exit(false, 127, "pkexec: command not executable").0,
+            "service_error"
+        );
+        assert_eq!(
+            classify_appimage_early_exit(
+                false,
+                127,
+                "Error creating textual authentication agent"
+            )
+            .0,
+            "no_admin_agent"
+        );
+        assert_eq!(
+            classify_appimage_early_exit(true, 1, "sudo: a password is required").0,
+            "no_admin_prompt"
+        );
+        assert_eq!(
+            classify_appimage_early_exit(true, 1, "sudo: no password was provided").0,
+            "permission_refused"
+        );
+        assert_eq!(generate_appimage_secret().len(), 64);
     }
 }

@@ -1112,6 +1112,181 @@ pub fn lan_file_server_close(handle: u64) -> bool {
     true
 }
 
+// ============================================================================
+// 3. Phone-to-TV Pairing Client (`send_to_tv.dart`)
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SendToTvOutcome {
+    Sent,
+    NotTvCode,
+    Expired,
+    Busy,
+    Unreachable,
+}
+
+impl SendToTvOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::NotTvCode => "notTvCode",
+            Self::Expired => "expired",
+            Self::Busy => "busy",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TvImportTarget {
+    pub addr: SocketAddr,
+    pub authority: String,
+    pub path: String,
+    pub normalized_url: String,
+}
+
+const FORM_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+/// Validates a QR code scanned from a TV's add-profile sheet (`parseTvImportCode` in `send_to_tv.dart`):
+/// - `http://` scheme only, explicit `:port` required, no `userInfo`, no `?query`, no `#fragment`
+/// - Literal IPv4 or `[IPv6]` address belonging to a local network (`is_local_network_bytes`)
+/// - Exact `/<6 digits>` secret path (`PHONE_IMPORT_TOKEN_LENGTH`).
+pub fn parse_tv_import_code(scanned: &str) -> Option<TvImportTarget> {
+    let trimmed = scanned.trim();
+    if trimmed.contains('?') || trimmed.contains('#') {
+        return None;
+    }
+    if trimmed.len() <= 7 || !trimmed[..7].eq_ignore_ascii_case("http://") {
+        return None;
+    }
+    let after_scheme = &trimmed[7..];
+    let (authority_raw, path_no_slash) = after_scheme.split_once('/')?;
+    if authority_raw.is_empty() || authority_raw.contains('@') {
+        return None;
+    }
+
+    let (ip, port_str) = if let Some(rest_v6) = authority_raw.strip_prefix('[') {
+        let (v6_str, after_bracket) = rest_v6.split_once(']')?;
+        let p_str = after_bracket.strip_prefix(':')?;
+        let v6: std::net::Ipv6Addr = v6_str.parse().ok()?;
+        (IpAddr::V6(v6), p_str)
+    } else {
+        let (v4_str, p_str) = authority_raw.split_once(':')?;
+        if !crate::is_valid_dart_ipv4(v4_str) {
+            return None;
+        }
+        let v4: std::net::Ipv4Addr = v4_str.parse().ok()?;
+        (IpAddr::V4(v4), p_str)
+    };
+
+    if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    if port == 0 || !ip_is_local(ip) {
+        return None;
+    }
+
+    if path_no_slash.len() != PHONE_IMPORT_TOKEN_LENGTH
+        || !path_no_slash.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let addr = SocketAddr::new(ip, port);
+    let authority = format_authority(addr);
+    let path = format!("/{path_no_slash}");
+    let normalized_url = format!("http://{authority}{path}");
+    Some(TvImportTarget {
+        addr,
+        authority,
+        path,
+        normalized_url,
+    })
+}
+
+/// Sends `link` directly to the TV pairing server identified by `scanned` (`sendLinkToTv` in `send_to_tv.dart`).
+pub fn send_link_to_tv(scanned: &str, link: &str) -> SendToTvOutcome {
+    let Some(target) = parse_tv_import_code(scanned) else {
+        return SendToTvOutcome::NotTvCode;
+    };
+
+    let mut stream = match TcpStream::connect_timeout(&target.addr, Duration::from_secs(8)) {
+        Ok(s) => s,
+        Err(_) => return SendToTvOutcome::Unreachable,
+    };
+    let io_timeout = Some(Duration::from_secs(10));
+    let _ = stream.set_read_timeout(io_timeout);
+    let _ = stream.set_write_timeout(io_timeout);
+    let _ = stream.set_nodelay(true);
+
+    let encoded_link = utf8_percent_encode(link, FORM_VALUE_ENCODE_SET).to_string();
+    let body = format!("link={encoded_link}");
+    let req = format!(
+        "POST {} HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Type: application/x-www-form-urlencoded; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n\
+         {body}",
+        target.path,
+        target.authority,
+        body.len(),
+    );
+
+    if stream.write_all(req.as_bytes()).is_err() || stream.flush().is_err() {
+        return SendToTvOutcome::Unreachable;
+    }
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    if reader.read_line(&mut status_line).unwrap_or(0) == 0 {
+        return SendToTvOutcome::Unreachable;
+    }
+    let Some(code) = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+    else {
+        return SendToTvOutcome::Unreachable;
+    };
+
+    // Drain remainder of response cleanly
+    let _ = io::copy(&mut reader, &mut io::sink());
+
+    match code {
+        200 | 303 => SendToTvOutcome::Sent,
+        429 => SendToTvOutcome::Busy,
+        404 => SendToTvOutcome::Expired,
+        _ => SendToTvOutcome::Unreachable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,5 +1426,42 @@ mod tests {
         let dl = lan_file_server_poll_downloads(finfo.handle).unwrap();
         assert_eq!(dl, vec!["127.0.0.1".to_string()]);
         assert!(lan_file_server_close(finfo.handle));
+
+        // Phone-to-TV pairing client tests (`send_to_tv_test.dart` parity)
+        assert!(parse_tv_import_code("http://192.168.1.20:41234/123456").is_some());
+        assert!(parse_tv_import_code(" http://10.0.0.5:8080/000000\n").is_some());
+        assert!(parse_tv_import_code("http://[fd00::1]:8080/123456").is_some());
+        for bad in [
+            "vless://uuid@1.2.3.4:443",
+            "https://example.com/sub",
+            "http://8.8.8.8:80/123456",
+            "http://tv.local:8080/123456",
+            "http://192.168.1.20/123456",
+            "http://192.168.1.20:8080/12345",
+            "http://192.168.1.20:8080/1234567",
+            "http://192.168.1.20:8080/abcdef",
+            "http://192.168.1.20:8080/123456?x=1",
+            "http://u:p@192.168.1.20:8080/123456",
+            "https://192.168.1.20:8080/123456",
+        ] {
+            assert!(parse_tv_import_code(bad).is_none(), "expected None for {bad}");
+        }
+
+        let tv = phone_import_server_start("127.0.0.1", sample_text()).unwrap();
+        let link = "https://sub.example.com/abc?name=My Sub#Mine";
+        assert_eq!(send_link_to_tv(&tv.url, link), SendToTvOutcome::Sent);
+        let tv_poll = phone_import_server_poll(tv.handle).unwrap();
+        assert_eq!(tv_poll.entries.len(), 1);
+        assert_eq!(tv_poll.entries[0].text, link);
+        assert_eq!(
+            send_link_to_tv("https://example.com", "x"),
+            SendToTvOutcome::NotTvCode
+        );
+        let stale_tok = if tv.token == "000000" { "111111" } else { "000000" };
+        assert_eq!(
+            send_link_to_tv(&format!("http://127.0.0.1:{}/{stale_tok}", tv.port), "x"),
+            SendToTvOutcome::Expired
+        );
+        assert!(phone_import_server_close(tv.handle));
     }
 }

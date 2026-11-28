@@ -16,6 +16,7 @@ pub mod fetch_url;
 pub mod health_check;
 pub mod lan_server;
 pub mod proxy_dial;
+pub mod speedtest;
 pub mod system_proxy;
 pub mod update_download;
 

@@ -207,6 +207,9 @@ typedef _U64VoidDart = void Function(int);
 typedef _U64ToStrNative = ffi.Pointer<Utf8> Function(ffi.Uint64);
 typedef _U64ToStrDart = ffi.Pointer<Utf8> Function(int);
 
+typedef _StrI32ToStrNative = ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>, ffi.Int32);
+typedef _StrI32ToStrDart = ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>, int);
+
 /// Cross-platform `dart:ffi` loader and bindings for `libhiddify_rust` across
 /// iOS (`XCFramework` static symbols), Android (`jniLibs`), macOS (`dylib`/`XCFramework`), and Linux (`bundle/lib`).
 class HiddifyRustNative {
@@ -223,7 +226,7 @@ class HiddifyRustNative {
       try {
         final lib = candidate();
         final b = _Bindings(lib);
-        if (b.abiVersion() == 5) {
+        if (b.abiVersion() == 6) {
           return b;
         }
       } catch (_) {
@@ -1612,6 +1615,65 @@ class HiddifyRustNative {
       error: map['error'] as String?,
     );
   }
+
+  // --- Phase 6 (C-ABI v6): Phone-to-TV Client, AppImageService & Speedtest ---
+
+  String? parseTvImportCode(String scanned) {
+    final b = _bindings;
+    if (b == null) return null;
+    return _callStrToStr(b.parseTvImportCode, scanned);
+  }
+
+  String? sendLinkToTv(String scanned, String link) {
+    final b = _bindings;
+    if (b == null) return null;
+    return using((arena) {
+      final sPtr = scanned.toNativeUtf8(allocator: arena);
+      final lPtr = link.toNativeUtf8(allocator: arena);
+      return _readAndFree(b.sendLinkToTv(sPtr, lPtr));
+    });
+  }
+
+  ({String status, int handle, String secret, int port, String? message})? appImageServiceStart({
+    required String appImagePath,
+    required int ownerPid,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = using((arena) {
+      final pPtr = appImagePath.toNativeUtf8(allocator: arena);
+      return _readAndFree(b.appImageServiceStartJson(pPtr, ownerPid));
+    });
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      status: map['status'] as String,
+      handle: (map['handle'] as num).toInt(),
+      secret: (map['secret'] as String?) ?? '',
+      port: (map['port'] as num).toInt(),
+      message: map['message'] as String?,
+    );
+  }
+
+  bool? appImageServiceIsRunning(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.appImageServiceIsRunning(handle));
+  }
+
+  bool? appImageServiceStop(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.appImageServiceStop(handle));
+  }
+
+  Map<String, dynamic>? runSpeedtest(Map<String, dynamic> options) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _callStrToStr(b.speedtestJson, jsonEncode(options));
+    if (raw == null) return null;
+    return jsonDecode(raw) as Map<String, dynamic>;
+  }
 }
 
 class _Bindings {
@@ -1955,6 +2017,24 @@ class _Bindings {
       ),
       expandLinksNativeJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
         'hiddify_profile_expand_links_native_json',
+      ),
+      parseTvImportCode = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_parse_tv_import_code',
+      ),
+      sendLinkToTv = lib.lookupFunction<_Str2ToStrNative, _Str2ToStrDart>(
+        'hiddify_net_send_link_to_tv',
+      ),
+      appImageServiceStartJson = lib.lookupFunction<_StrI32ToStrNative, _StrI32ToStrDart>(
+        'hiddify_net_appimage_service_start_json',
+      ),
+      appImageServiceIsRunning = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_appimage_service_is_running',
+      ),
+      appImageServiceStop = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_appimage_service_stop',
+      ),
+      speedtestJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_speedtest_json',
       );
 
   final _AbiVersionDart abiVersion;
@@ -2094,4 +2174,10 @@ class _Bindings {
   final _StrToStrDart finalizeDownloadedRemoteJson;
   final _StrToStrDart prepareLocalProfileJson;
   final _StrToStrDart expandLinksNativeJson;
+  final _StrToStrDart parseTvImportCode;
+  final _Str2ToStrDart sendLinkToTv;
+  final _StrI32ToStrDart appImageServiceStartJson;
+  final _U64ToBoolDart appImageServiceIsRunning;
+  final _U64ToBoolDart appImageServiceStop;
+  final _StrToStrDart speedtestJson;
 }

@@ -259,6 +259,14 @@ char *hiddify_profile_finalize_downloaded_remote_json(const char *request_json);
 char *hiddify_profile_prepare_local_json(const char *request_json);
 char *hiddify_profile_expand_links_native_json(const char *request_json);
 
+/* Phase 6 (C-ABI v6): Phone-to-TV Client, Linux AppImage Service & Speedtest */
+char *hiddify_net_parse_tv_import_code(const char *scanned);
+char *hiddify_net_send_link_to_tv(const char *scanned, const char *link);
+char *hiddify_net_appimage_service_start_json(const char *appimage_path, int32_t owner_pid);
+int32_t hiddify_net_appimage_service_is_running(uint64_t handle);
+int32_t hiddify_net_appimage_service_stop(uint64_t handle);
+char *hiddify_net_speedtest_json(const char *request_json);
+
 #ifdef __cplusplus
 }
 #endif
