@@ -39,16 +39,5 @@ ProfilePathResolver profilePathResolver(Ref ref) {
 
 @Riverpod(keepAlive: true)
 ProfileParser profileParser(Ref ref) {
-  final core = ref.watch(hiddifyCoreServiceProvider);
-  return ProfileParser(
-    httpClient: ref.watch(httpClientProvider),
-    coreFetch: (url, userAgent, {required cancel}) {
-      return core.fetchUrlAsync(
-        url,
-        userAgent: userAgent,
-        timeout: const Duration(seconds: 30),
-        cancel: cancel,
-      );
-    },
-  );
+  return ProfileParser.native(httpClient: ref.watch(httpClientProvider));
 }

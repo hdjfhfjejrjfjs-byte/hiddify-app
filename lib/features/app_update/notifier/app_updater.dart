@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi' show Abi;
 import 'dart:io';
 import 'dart:isolate';
@@ -6,6 +7,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hiddify/core/app_info/app_info_provider.dart';
+import 'package:hiddify/core/http_client/dio_http_client.dart';
 import 'package:hiddify/core/http_client/http_client_provider.dart';
 import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/app_update/model/install_kind.dart';
@@ -149,28 +151,81 @@ class AppUpdater extends _$AppUpdater with AppLogger {
     final directory = Directory(p.join((await getTemporaryDirectory()).path, 'updates'));
     await directory.create(recursive: true);
     final file = File(p.join(directory.path, asset.name));
+    final client = ref.read(httpClientProvider);
+    _cancel = CancelToken();
+
+    // Production path: single-pass Rust streaming download + on-the-fly SHA-256 verification.
+    if (client.runtimeType == DioHttpClient) {
+      final url = asset.url;
+      final destPath = file.path;
+      final expectedSize = asset.size;
+      final userAgent = client.userAgent;
+      final proxyPort = client.port;
+      final proxySecret = client.secret;
+      final taskId = hiddifyRust.require(hiddifyRust.createTask(), 'createTask');
+      unawaited(_cancel!.whenCancel.then((_) => hiddifyRust.cancelTask(taskId)));
+
+      final timer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+        final snap = hiddifyRust.taskProgress(taskId);
+        if (snap != null && state is AppUpdaterDownloading) {
+          final size = snap.totalBytes > 0 ? snap.totalBytes : expectedSize;
+          state = AppUpdaterDownloading(size > 0 ? (snap.receivedBytes / size).clamp(0.0, 1.0) : null);
+        }
+      });
+
+      try {
+        final res = await Isolate.run(
+          () => hiddifyRust.require(
+            hiddifyRust.downloadUpdateVerified(
+              url: url,
+              destinationPath: destPath,
+              expectedSize: expectedSize,
+              expectedSha256: digest,
+              userAgent: userAgent,
+              proxyPort: proxyPort,
+              proxySecret: proxySecret,
+              cancelTaskId: taskId,
+            ),
+            'downloadUpdateVerified',
+          ),
+        );
+        if (_cancel?.cancelError case final cancellation?) throw cancellation;
+        switch (res.status) {
+          case 'ok' || 'reused':
+            return file;
+          case 'cancelled':
+            if (_cancel?.cancelError case final cancellation?) throw cancellation;
+            throw StateError('${asset.name}: download cancelled.');
+          case 'sha256_mismatch':
+            throw StateError('${asset.name}: SHA-256 verification failed; the update was not installed.');
+          default:
+            throw Exception('${asset.name}: ${res.error ?? res.status}');
+        }
+      } finally {
+        timer.cancel();
+        hiddifyRust.removeTask(taskId);
+      }
+    }
+
+    // Unit-test mock client hook (when `httpClientProvider` is overridden with a test subclass).
     if (file.existsSync()) {
-      // a download the installer did not take yet, e.g. while the user gave the permission
       if (await _matches(file, asset.size, digest)) return file;
       await file.delete();
     }
-    _cancel = CancelToken();
-    await ref
-        .read(httpClientProvider)
-        .download(
-          asset.url,
-          file.path,
-          cancelToken: _cancel,
-          onReceiveProgress: (received, total) {
-            final size = total > 0 ? total : asset.size;
-            state = AppUpdaterDownloading(size > 0 ? (received / size).clamp(0, 1) : null);
-          },
-        );
+    await client.download(
+      asset.url,
+      file.path,
+      cancelToken: _cancel,
+      onReceiveProgress: (received, total) {
+        final size = total > 0 ? total : asset.size;
+        state = AppUpdaterDownloading(size > 0 ? (received / size).clamp(0, 1) : null);
+      },
+    );
     final length = await file.length();
     if (asset.size > 0 && length != asset.size) {
+      await file.delete();
       throw Exception("${asset.name}: got $length of ${asset.size} bytes");
     }
-    // Stream the artifact so verifying an AppImage/APK does not load it all into memory.
     final verified = await _verifyFileSha256(file.path, 0, digest);
     if (_cancel?.cancelError case final cancellation?) throw cancellation;
     if (!verified) {

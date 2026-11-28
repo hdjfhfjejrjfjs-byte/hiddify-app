@@ -1,13 +1,29 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:hiddify/core/rust/hiddify_rust.dart';
-import 'package:hiddify/features/profile/add/phone_import/phone_import_page.dart';
 
-export 'package:hiddify/features/profile/add/phone_import/phone_import_page.dart'
-    show PhoneImportPageText, PhoneImportStep;
+/// One step of the page's guide.
+typedef PhoneImportStep = ({String title, String body});
+
+/// The texts of the page the phone opens, in the TV's language.
+typedef PhoneImportPageText = ({
+  String lang,
+  bool rtl,
+  String title,
+  String intro,
+  PhoneImportStep network,
+  PhoneImportStep copy,
+  PhoneImportStep paste,
+  PhoneImportStep confirm,
+  String label,
+  String hint,
+  String send,
+  String sentTitle,
+  String sent,
+  String empty,
+  String footer,
+});
 
 /// What a phone sent: a subscription link or a config, waiting for the TV user to import it.
 class PhoneEntry {
@@ -18,50 +34,76 @@ class PhoneEntry {
   final DateTime at;
 }
 
-/// A one-time page on the local network where a phone can send a subscription link to this TV.
-///
-/// It listens on the TV's address on the local network only, at a random port, and answers only
-/// at a random secret path, which the QR code carries: a device that has not scanned the code
-/// gets 404, as for any other path. The secret is a code of [tokenLength] digits, easy to type,
-/// which is enough because it can hardly be guessed: after [maxMisses] wrong tries, from any
-/// devices together, the page locks for good, and the TV offers a new code once the sheet is
-/// opened again. Only devices on a local network are served, a request must name this server in
-/// its Host (so a web page can not reach it by rebinding its own name), and a text larger than
-/// [maxText] bytes is refused. The page needs no script. What the phone sends is only offered to
-/// the TV user, never imported by itself.
+/// Native Rust LAN HTTP server (`hiddify-net::lan_server`) where a phone can send a subscription
+/// link to an Android TV on the same local network.
 class PhoneImportServer {
-  PhoneImportServer._(this._server, this._token, this._text);
+  PhoneImportServer._(this._handle, this.url);
 
   static const tokenLength = 6;
-
-  /// Wrong tries, from all devices together, before the page locks: 10 in a million.
   static const maxMisses = 10;
-
   static const maxText = 64 * 1024;
-
-  /// Most entries waiting on the TV at once; more are refused until some are dealt with.
   static const maxPending = 20;
 
-  final HttpServer _server;
-  final String _token;
-  final PhoneImportPageText _text;
+  final int _handle;
+  final Uri url;
   final _entries = StreamController<PhoneEntry>.broadcast();
   final _locked = Completer<void>();
-  var _misses = 0;
-  var _pending = 0;
+  Timer? _pollTimer;
+  var _closed = false;
 
   /// Starts serving on [address], which must be this device's address on the local network.
   static Future<PhoneImportServer> start(InternetAddress address, PhoneImportPageText text) async {
-    final server = await HttpServer.bind(address, 0);
-    server.autoCompress = false;
-    server.idleTimeout = const Duration(seconds: 30);
-    final import = PhoneImportServer._(server, _newToken(), text);
-    server.listen(import._handle, onError: (_) {});
-    return import;
+    final info = hiddifyRust.require(
+      hiddifyRust.phoneImportServerStart(
+        bindIp: address.address,
+        pageText: {
+          'lang': text.lang,
+          'rtl': text.rtl,
+          'title': text.title,
+          'intro': text.intro,
+          'network': {'title': text.network.title, 'body': text.network.body},
+          'copy': {'title': text.copy.title, 'body': text.copy.body},
+          'paste': {'title': text.paste.title, 'body': text.paste.body},
+          'confirm': {'title': text.confirm.title, 'body': text.confirm.body},
+          'label': text.label,
+          'hint': text.hint,
+          'send': text.send,
+          'sentTitle': text.sentTitle,
+          'sent': text.sent,
+          'empty': text.empty,
+          'footer': text.footer,
+        },
+      ),
+      'phoneImportServerStart',
+    );
+    final server = PhoneImportServer._(info.handle, Uri.parse(info.url));
+    server._startPolling();
+    return server;
   }
 
-  /// The page's address, with its secret: what the QR code shows.
-  Uri get url => Uri(scheme: 'http', host: _server.address.address, port: _server.port, path: '/$_token');
+  void _startPolling() {
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 20), (_) => _drain());
+  }
+
+  void _drain() {
+    if (_closed) return;
+    final snap = hiddifyRust.phoneImportServerPoll(_handle);
+    if (snap == null) return;
+    if (snap.locked && !_locked.isCompleted) {
+      _locked.complete();
+    }
+    for (final ev in snap.entries) {
+      if (!_entries.isClosed) {
+        _entries.add(
+          PhoneEntry(
+            text: ev.text,
+            from: InternetAddress(ev.fromIp),
+            at: DateTime.fromMillisecondsSinceEpoch(ev.timestampMs),
+          ),
+        );
+      }
+    }
+  }
 
   /// Each text a phone sends, as it arrives.
   Stream<PhoneEntry> get entries => _entries.stream;
@@ -69,117 +111,31 @@ class PhoneImportServer {
   /// Completes when too many wrong tries locked the page.
   Future<void> get whenLocked => _locked.future;
 
-  bool get isLocked => _locked.isCompleted;
+  bool get isLocked {
+    if (_locked.isCompleted) return true;
+    if (_closed) return false;
+    final lockedNow = hiddifyRust.phoneImportServerIsLocked(_handle) ?? false;
+    if (lockedNow && !_locked.isCompleted) {
+      _locked.complete();
+    }
+    return lockedNow;
+  }
 
   /// One entry was imported or discarded on the TV, so there is room for another.
-  void handled() => _pending = max(0, _pending - 1);
+  void handled() {
+    if (!_closed) {
+      hiddifyRust.phoneImportServerHandled(_handle);
+    }
+  }
 
   Future<void> close() async {
-    await _server.close(force: true);
+    if (_closed) return;
+    _drain();
+    _closed = true;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    hiddifyRust.phoneImportServerClose(_handle);
     await _entries.close();
-  }
-
-  static String _newToken() => hiddifyRust.require(hiddifyRust.generateNumericPin(tokenLength), 'generateNumericPin');
-
-  Future<void> _handle(HttpRequest request) async {
-    final response = request.response;
-    try {
-      final remote = request.connectionInfo?.remoteAddress;
-      if (remote == null || !isLocalNetwork(remote) || isLocked) {
-        return await _plain(response, HttpStatus.notFound, 'Not found');
-      }
-      if (!_isOwnHost(request) || !_isOwnPath(request.uri.path)) {
-        // a browser asks for its icon by itself; that is no guess
-        if (request.uri.path != '/favicon.ico' && ++_misses >= maxMisses) _locked.complete();
-        return await _plain(response, HttpStatus.notFound, 'Not found');
-      }
-      switch (request.method) {
-        case 'GET' || 'HEAD':
-          return await _page(response, sent: request.uri.queryParameters.containsKey('sent'));
-        case 'POST':
-          return await _receive(request, remote);
-        default:
-          response.headers.set(HttpHeaders.allowHeader, 'GET, POST');
-          return await _plain(response, HttpStatus.methodNotAllowed, 'Method not allowed');
-      }
-    } catch (_) {
-      try {
-        await _plain(response, HttpStatus.badRequest, 'Bad request');
-      } catch (_) {}
-    }
-  }
-
-  bool _isOwnHost(HttpRequest request) => hiddifyRust.require(
-    hiddifyRust.isAllowedHostHeader(request.headers.value(HttpHeaders.hostHeader), url.authority),
-    'isAllowedHostHeader',
-  );
-
-  /// The secret path, compared in constant time.
-  bool _isOwnPath(String path) => hiddifyRust.require(hiddifyRust.verifySecretPath(path, _token), 'verifySecretPath');
-
-  Future<void> _receive(HttpRequest request, InternetAddress remote) async {
-    final response = request.response;
-    final type = request.headers.contentType;
-    if (type == null || type.mimeType != 'application/x-www-form-urlencoded') {
-      return _plain(response, HttpStatus.unsupportedMediaType, 'Unsupported media type');
-    }
-    final length = request.headers.contentLength;
-    if (length > maxText * 3) return _plain(response, HttpStatus.requestEntityTooLarge, 'Too large');
-    final body = BytesBuilder(copy: false);
-    await for (final chunk in request) {
-      body.add(chunk);
-      // a form encodes a byte as at most three
-      if (body.length > maxText * 3) return _plain(response, HttpStatus.requestEntityTooLarge, 'Too large');
-    }
-    final parsed = hiddifyRust.require(
-      hiddifyRust.parsePhoneImportForm(body.takeBytes(), maxText),
-      'parsePhoneImportForm',
-    );
-    switch (parsed.status) {
-      case 'bad_request':
-        return _plain(response, HttpStatus.badRequest, 'Bad request');
-      case 'too_large':
-        return _plain(response, HttpStatus.requestEntityTooLarge, 'Too large');
-      case 'empty':
-        return _page(response, sent: false, status: HttpStatus.badRequest, error: _text.empty);
-    }
-    final text = parsed.text!;
-    if (_pending >= maxPending) return _plain(response, HttpStatus.tooManyRequests, 'Too many requests');
-    _pending++;
-    _entries.add(PhoneEntry(text: text, from: remote, at: DateTime.now()));
-    // back to the page, so a reload does not send it again
-    response.statusCode = HttpStatus.seeOther;
-    response.headers.set(HttpHeaders.locationHeader, '/$_token?sent');
-    _secure(response);
-    await response.close();
-  }
-
-  Future<void> _page(HttpResponse response, {required bool sent, int status = HttpStatus.ok, String? error}) async {
-    response.statusCode = status;
-    response.headers.contentType = ContentType.html;
-    _secure(response);
-    response.write(phoneImportPage(_text, action: '/$_token', maxText: maxText, sent: sent, error: error));
-    await response.close();
-  }
-
-  Future<void> _plain(HttpResponse response, int status, String message) async {
-    response.statusCode = status;
-    response.headers.contentType = ContentType.text;
-    _secure(response);
-    response.write(message);
-    await response.close();
-  }
-
-  static void _secure(HttpResponse response) {
-    response.headers
-      ..set(HttpHeaders.cacheControlHeader, 'no-store')
-      ..set(
-        'Content-Security-Policy',
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-      )
-      ..set('X-Content-Type-Options', 'nosniff')
-      ..set('X-Frame-Options', 'DENY')
-      ..set('Referrer-Policy', 'no-referrer');
   }
 }
 
