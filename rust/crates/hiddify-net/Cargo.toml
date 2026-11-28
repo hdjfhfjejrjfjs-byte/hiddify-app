@@ -6,6 +6,20 @@ license.workspace = true
 description = "Cross-platform network rule validators (URL, CIDR, port, domain_suffix, OS process paths), IP privacy masking, and proxy tag/endpoint parsers."
 
 [dependencies]
+base64.workspace = true
+flate2.workspace = true
+libc.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pki-types.workspace = true
+rustls-rustcrypto.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+hiddify-crypto = { path = "../hiddify-crypto" }
+tempfile = "3.13"

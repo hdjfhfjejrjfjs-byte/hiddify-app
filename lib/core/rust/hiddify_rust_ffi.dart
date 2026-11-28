@@ -211,7 +211,7 @@ class HiddifyRustNative {
       try {
         final lib = candidate();
         final b = _Bindings(lib);
-        if (b.abiVersion() == 3) {
+        if (b.abiVersion() == 4) {
           return b;
         }
       } catch (_) {
@@ -1183,6 +1183,169 @@ class HiddifyRustNative {
       encrypted: map['encrypted'] as bool,
     );
   }
+
+  // --- Phase 4: FetchUrl, Desktop Admin Service Elevation & User System Proxy ---
+
+  ({
+    int statusCode,
+    List<({String name, String value})> headers,
+    Uint8List body,
+    int error,
+    String errorDetail,
+  })?
+  fetchUrl({
+    required String url,
+    String userAgent = '',
+    int timeoutMs = 30000,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      'url': url,
+      'userAgent': userAgent,
+      'timeoutMs': timeoutMs,
+    });
+    final raw = _callStrToStr(b.fetchUrlJson, reqJson);
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    if (map['ok'] != true) {
+      throw ArgumentError((map['errorDetail'] as String?) ?? 'invalid fetchUrl request');
+    }
+    final headersList = <({String name, String value})>[
+      for (final item in (map['headers'] as List<dynamic>? ?? const []))
+        if (item is Map<String, dynamic>)
+          (name: item['name'] as String, value: item['value'] as String),
+    ];
+    final bodyB64 = (map['bodyB64'] as String?) ?? '';
+    return (
+      statusCode: (map['statusCode'] as num).toInt(),
+      headers: headersList,
+      body: bodyB64.isEmpty ? Uint8List(0) : base64.decode(bodyB64),
+      error: (map['error'] as num).toInt(),
+      errorDetail: (map['errorDetail'] as String?) ?? '',
+    );
+  }
+
+  bool? isAdmin() => _bindings == null ? null : _toBool(_bindings.isAdmin());
+
+  bool? tunAllowed() => _bindings == null ? null : _toBool(_bindings.tunAllowed());
+
+  ({
+    int decision,
+    List<({String tag, String summary, String detail})> adminNeededProxies,
+  })?
+  needAdminBgService({
+    required String serviceMode,
+    required String hiddifySettingsJson,
+    required int adminPreference,
+    bool privilegeErrorRemembered = false,
+    String? cliPath,
+    String? buildId,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      'serviceMode': serviceMode,
+      'hiddifySettingsJson': hiddifySettingsJson,
+      'adminPreference': adminPreference,
+      'privilegeErrorRemembered': privilegeErrorRemembered,
+      if (cliPath != null) 'cliPath': cliPath,
+      if (buildId != null) 'buildId': buildId,
+    });
+    final raw = _callStrToStr(b.needAdminBgServiceJson, reqJson);
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    final proxies = <({String tag, String summary, String detail})>[
+      for (final item in (map['adminNeededProxies'] as List<dynamic>? ?? const []))
+        if (item is Map<String, dynamic>)
+          (
+            tag: item['tag'] as String,
+            summary: item['summary'] as String,
+            detail: item['detail'] as String,
+          ),
+    ];
+    return (
+      decision: (map['decision'] as num).toInt(),
+      adminNeededProxies: proxies,
+    );
+  }
+
+  List<({int progress, String message, int servicePort})>? ensureAdminBgService({
+    required String configContent,
+    required String configName,
+    required String settingsJson,
+    required Map<String, List<int>> resources,
+    required bool disableMemoryLimit,
+    required int ownerPid,
+    required String cliPath,
+    required String ownerUser,
+    required bool proxyOnly,
+    String? buildId,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final resourcesB64 = <String, String>{
+      for (final MapEntry(:key, :value) in resources.entries) key: base64.encode(value),
+    };
+    final reqJson = jsonEncode({
+      'configContent': configContent,
+      'configName': configName,
+      'settingsJson': settingsJson,
+      'resourcesB64': resourcesB64,
+      'disableMemoryLimit': disableMemoryLimit,
+      'ownerPid': ownerPid,
+      'cliPath': cliPath,
+      'ownerUser': ownerUser,
+      'proxyOnly': proxyOnly,
+      if (buildId != null) 'buildId': buildId,
+    });
+    final raw = _callStrToStr(b.ensureAdminBgServiceJson, reqJson);
+    if (raw == null) return null;
+    return [
+      for (final item in (jsonDecode(raw) as List<dynamic>))
+        if (item is Map<String, dynamic>)
+          (
+            progress: (item['progress'] as num).toInt(),
+            message: (item['message'] as String?) ?? '',
+            servicePort: ((item['service_port'] ?? item['servicePort'] ?? 0) as num).toInt(),
+          ),
+    ];
+  }
+
+  ({bool ok, String message})? setSystemProxyEnabled({
+    String? workingDir,
+    required bool isEnabled,
+    String address = '',
+    bool supportSocks = false,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      if (workingDir != null) 'workingDir': workingDir,
+      'isEnabled': isEnabled,
+      'address': address,
+      'supportSocks': supportSocks,
+    });
+    final raw = _callStrToStr(b.setSystemProxyEnabledJson, reqJson);
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      ok: (map['ok'] as bool?) ?? false,
+      message: (map['message'] as String?) ?? '',
+    );
+  }
+
+  ({bool available, bool enabled})? getSystemProxyStatus() {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _readAndFree(b.getSystemProxyStatusJson());
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      available: (map['available'] as bool?) ?? false,
+      enabled: (map['enabled'] as bool?) ?? false,
+    );
+  }
 }
 
 class _Bindings {
@@ -1451,6 +1614,27 @@ class _Bindings {
       ),
       exportDiagnosticsReportJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
         'hiddify_diagnostics_export_report_json',
+      ),
+      fetchUrlJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_fetch_url_json',
+      ),
+      isAdmin = lib.lookupFunction<_NoArgBoolNative, _NoArgBoolDart>(
+        'hiddify_net_is_admin',
+      ),
+      tunAllowed = lib.lookupFunction<_NoArgBoolNative, _NoArgBoolDart>(
+        'hiddify_net_tun_allowed',
+      ),
+      needAdminBgServiceJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_need_admin_bg_service_json',
+      ),
+      ensureAdminBgServiceJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_ensure_admin_bg_service_json',
+      ),
+      setSystemProxyEnabledJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_set_system_proxy_enabled_json',
+      ),
+      getSystemProxyStatusJson = lib.lookupFunction<_NoArgStrNative, _NoArgStrDart>(
+        'hiddify_net_get_system_proxy_status_json',
       );
 
   final _AbiVersionDart abiVersion;
@@ -1565,4 +1749,11 @@ class _Bindings {
   final _StrToStrDart sanitizeReportText;
   final _StrToStrDart listCoreCrashReportsJson;
   final _StrToStrDart exportDiagnosticsReportJson;
+  final _StrToStrDart fetchUrlJson;
+  final _NoArgBoolDart isAdmin;
+  final _NoArgBoolDart tunAllowed;
+  final _StrToStrDart needAdminBgServiceJson;
+  final _StrToStrDart ensureAdminBgServiceJson;
+  final _StrToStrDart setSystemProxyEnabledJson;
+  final _NoArgStrDart getSystemProxyStatusJson;
 }

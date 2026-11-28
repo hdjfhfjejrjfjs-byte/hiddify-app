@@ -19,7 +19,7 @@ use hiddify_profile::download::DownloadProblemKind;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 
 unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
@@ -1284,6 +1284,232 @@ pub unsafe extern "C" fn hiddify_diagnostics_export_report_json(
     })
 }
 
+// ============================================================================
+// Phase 4: FetchUrl, Desktop Admin Service Elevation & User System Proxy FFI
+// ============================================================================
+
+/// Downloads a URL using Chrome-like TLS + system & Mozilla roots (`v2/hcore/fetch_url.go`).
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_fetch_url_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use hiddify_net::fetch_url::{fetch_url, FetchUrlRequest};
+
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: Value = serde_json::from_str(req_str).ok()?;
+        let url = req.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+        let user_agent = req
+            .get("userAgent")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let timeout_ms = req
+            .get("timeoutMs")
+            .and_then(Value::as_i64)
+            .unwrap_or(0) as i32;
+
+        match fetch_url(&FetchUrlRequest {
+            url,
+            user_agent,
+            timeout_ms,
+        }) {
+            Ok(outcome) => Some(
+                json!({
+                    "ok": true,
+                    "statusCode": outcome.status_code,
+                    "headers": outcome.headers,
+                    "bodyB64": STANDARD.encode(&outcome.body),
+                    "error": outcome.error.as_i32(),
+                    "errorDetail": outcome.error_detail,
+                })
+                .to_string(),
+            ),
+            Err(err) => Some(
+                json!({
+                    "ok": false,
+                    "invalidArgument": true,
+                    "errorDetail": err,
+                })
+                .to_string(),
+            ),
+        }
+    })
+}
+
+/// Reports whether the current process runs with administrator (Windows) or root (Unix) privileges.
+#[no_mangle]
+pub extern "C" fn hiddify_net_is_admin() -> i32 {
+    ffi_bool(|| Some(hiddify_net::admin_service::is_admin()))
+}
+
+/// Reports whether the current process is allowed to open a TUN interface.
+#[no_mangle]
+pub extern "C" fn hiddify_net_tun_allowed() -> i32 {
+    ffi_bool(|| Some(hiddify_net::admin_service::tun_allowed()))
+}
+
+/// Evaluates whether the elevated `admin_bgservice` is needed (`v2/hcore/admin_bgservice.go:NeedAdminBgService`).
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_need_admin_bg_service_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::admin_service::{need_admin_bg_service, NeedAdminBgServiceRequest};
+
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: Value = serde_json::from_str(req_str).ok()?;
+        let outcome = need_admin_bg_service(&NeedAdminBgServiceRequest {
+            service_mode: req
+                .get("serviceMode")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            hiddify_settings_json: req
+                .get("hiddifySettingsJson")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            admin_preference: req
+                .get("adminPreference")
+                .and_then(Value::as_i64)
+                .unwrap_or(0) as i32,
+            privilege_error_remembered: req
+                .get("privilegeErrorRemembered")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            cli_path: req
+                .get("cliPath")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            build_id: req
+                .get("buildId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+        Some(
+            json!({
+                "decision": outcome.decision,
+                "adminNeededProxies": outcome.admin_needed_proxies,
+            })
+            .to_string(),
+        )
+    })
+}
+
+/// Installs/starts `admin_bgservice` with UAC / PolicyKit / sudo elevation and connects it (`EnsureAdminBgService`).
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_ensure_admin_bg_service_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::admin_service::{ensure_admin_bg_service, EnsureAdminBgServiceRequest};
+    use std::collections::BTreeMap;
+
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: Value = serde_json::from_str(req_str).ok()?;
+        let mut resources_b64 = BTreeMap::new();
+        if let Some(obj) = req.get("resourcesB64").and_then(Value::as_object) {
+            for (k, v) in obj {
+                if let Some(b64) = v.as_str() {
+                    resources_b64.insert(k.clone(), b64.to_string());
+                }
+            }
+        }
+        let events = ensure_admin_bg_service(&EnsureAdminBgServiceRequest {
+            config_content: req
+                .get("configContent")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            config_name: req
+                .get("configName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            settings_json: req
+                .get("settingsJson")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            resources_b64,
+            disable_memory_limit: req
+                .get("disableMemoryLimit")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            owner_pid: req
+                .get("ownerPid")
+                .and_then(Value::as_i64)
+                .unwrap_or(0) as i32,
+            cli_path: req
+                .get("cliPath")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            owner_user: req
+                .get("ownerUser")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            proxy_only: req
+                .get("proxyOnly")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            build_id: req
+                .get("buildId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+        serde_json::to_string(&events).ok()
+    })
+}
+
+/// Enables or disables the user-session system proxy and cleans up `data/system-proxy.on` leftovers.
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_set_system_proxy_enabled_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::system_proxy::set_system_proxy_enabled;
+
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: Value = serde_json::from_str(req_str).ok()?;
+        let working_dir = req
+            .get("workingDir")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(Path::new);
+        let is_enabled = req
+            .get("isEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let address = req
+            .get("address")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let support_socks = req
+            .get("supportSocks")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        match set_system_proxy_enabled(working_dir, is_enabled, address, support_socks) {
+            Ok(()) => Some(json!({ "ok": true, "message": "" }).to_string()),
+            Err(msg) => Some(json!({ "ok": false, "message": msg }).to_string()),
+        }
+    })
+}
+
+/// Returns `{"available": bool, "enabled": bool}` (`GetSystemProxyStatus`).
+#[no_mangle]
+pub extern "C" fn hiddify_net_get_system_proxy_status_json() -> *mut c_char {
+    ffi_string(|| {
+        let st = hiddify_net::system_proxy::get_system_proxy_status();
+        serde_json::to_string(&st).ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,7 +1517,7 @@ mod tests {
 
     #[test]
     fn ffi_roundtrip_and_memory_release() {
-        assert_eq!(hiddify_rust_abi_version(), 3);
+        assert_eq!(hiddify_rust_abi_version(), 4);
 
         let ip = CString::new("1.2.3.4").unwrap();
         let masked_ptr = unsafe { hiddify_net_obscure_ip(ip.as_ptr()) };

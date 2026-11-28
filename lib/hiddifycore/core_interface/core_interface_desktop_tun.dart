@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:grpc/grpc.dart';
+import 'dart:isolate';
+import 'package:grpc/grpc.dart' hide Response;
 import 'package:hiddify/core/model/directories.dart';
+import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/hiddifycore/core_interface/admin_permission_refused.dart';
 import 'package:hiddify/hiddifycore/core_interface/appimage_service.dart';
 import 'package:hiddify/hiddifycore/core_interface/core_interface.dart';
@@ -135,7 +137,28 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
     required String settingsJson,
     required AdminPreference adminPreference,
     bool privilegeErrorRemembered = false,
-  }) {
+  }) async {
+    if (hiddifyRust.isAvailable) {
+      final cliPath = _cliPath;
+      final res = await Isolate.run(
+        () => hiddifyRust.needAdminBgService(
+          serviceMode: serviceMode,
+          hiddifySettingsJson: settingsJson,
+          adminPreference: adminPreference.value,
+          privilegeErrorRemembered: privilegeErrorRemembered,
+          cliPath: cliPath,
+        ),
+      );
+      if (res != null) {
+        return NeedAdminBgServiceResponse(
+          decision: AdminBgServiceDecision.valueOf(res.decision) ?? AdminBgServiceDecision.ADMIN_BG_SERVICE_NO,
+          adminNeededProxies: [
+            for (final p in res.adminNeededProxies)
+              AdminNeededProxy(tag: p.tag, summary: p.summary, detail: p.detail),
+          ],
+        );
+      }
+    }
     return fgClient.needAdminBgService(
       NeedAdminBgServiceRequest(
         serviceMode: serviceMode,
@@ -245,22 +268,72 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
       resources[entry.key] = entry.value;
     }
 
+    final settingsStr = jsonEncode(options.toJson());
+    final cliPath = _cliPath;
+    final ownerUser = _ownerUser;
+    final proxyOnly = !options.enableTun;
+    final currentPid = pid;
+
+    Stream<EnsureAdminBgServiceEvent> eventStream;
+    if (hiddifyRust.isAvailable) {
+      final rawEvents = await Isolate.run(
+        () => hiddifyRust.ensureAdminBgService(
+          configContent: snapshot.$1,
+          configName: name,
+          settingsJson: settingsStr,
+          resources: resources,
+          disableMemoryLimit: disableMemoryLimit,
+          ownerPid: currentPid,
+          cliPath: cliPath,
+          ownerUser: ownerUser,
+          proxyOnly: proxyOnly,
+        ),
+      );
+      if (rawEvents != null) {
+        eventStream = Stream.fromIterable([
+          for (final e in rawEvents)
+            EnsureAdminBgServiceEvent(
+              progress:
+                  EnsureAdminBgServiceProgress.valueOf(e.progress) ??
+                  EnsureAdminBgServiceProgress.ENSURE_ADMIN_BG_FAILED_OTHER,
+              message: e.message,
+              servicePort: e.servicePort,
+            ),
+        ]);
+      } else {
+        eventStream = fgClient.ensureAdminBgService(
+          EnsureAdminBgServiceRequest(
+            configContent: snapshot.$1,
+            configName: name,
+            settingsJson: settingsStr,
+            resources: resources,
+            disableMemoryLimit: disableMemoryLimit,
+            ownerPid: currentPid,
+            cliPath: cliPath,
+            ownerUser: ownerUser,
+            proxyOnly: proxyOnly,
+          ),
+        );
+      }
+    } else {
+      eventStream = fgClient.ensureAdminBgService(
+        EnsureAdminBgServiceRequest(
+          configContent: snapshot.$1,
+          configName: name,
+          settingsJson: settingsStr,
+          resources: resources,
+          disableMemoryLimit: disableMemoryLimit,
+          ownerPid: currentPid,
+          cliPath: cliPath,
+          ownerUser: ownerUser,
+          proxyOnly: proxyOnly,
+        ),
+      );
+    }
+
     EnsureAdminBgServiceProgress? last;
     String? lastMessage;
-    await for (final event in fgClient.ensureAdminBgService(
-      EnsureAdminBgServiceRequest(
-        configContent: snapshot.$1,
-        configName: name,
-        settingsJson: jsonEncode(options.toJson()),
-        resources: resources,
-        disableMemoryLimit: disableMemoryLimit,
-        ownerPid: pid,
-        cliPath: _cliPath,
-        ownerUser: _ownerUser,
-        // a proxy mode whose profile needs administrator rights runs without the TUN
-        proxyOnly: !options.enableTun,
-      ),
-    )) {
+    await for (final event in eventStream) {
       last = event.progress;
       lastMessage = event.message;
       if (event.progress == EnsureAdminBgServiceProgress.ENSURE_ADMIN_BG_FAILED_PERMISSION_DENIED) {
@@ -435,8 +508,10 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
       await _restoreServiceSystemProxy();
       return;
     }
-    final response = await fgClient.setSystemProxyEnabled(
-      SetSystemProxyEnabledRequest(isEnabled: true, address: status.systemProxy, supportSocks: status.systemProxySocks),
+    final response = await _setSystemProxyEnabled(
+      isEnabled: true,
+      address: status.systemProxy,
+      supportSocks: status.systemProxySocks,
     );
     if (response.code != ResponseCode.OK) {
       // the system proxy mode is pointless without it; beside a TUN it is only a convenience
@@ -498,14 +573,43 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
     return true;
   }
 
+  Future<Response> _setSystemProxyEnabled({
+    required bool isEnabled,
+    String address = '',
+    bool supportSocks = false,
+  }) async {
+    if (hiddifyRust.isAvailable) {
+      final workingDir = _workingDirectory?.path;
+      final res = await Isolate.run(
+        () => hiddifyRust.setSystemProxyEnabled(
+          workingDir: workingDir,
+          isEnabled: isEnabled,
+          address: address,
+          supportSocks: supportSocks,
+        ),
+      );
+      if (res != null) {
+        return Response(
+          code: res.ok ? ResponseCode.OK : ResponseCode.FAILED,
+          message: res.message,
+        );
+      }
+    }
+    return fgClient.setSystemProxyEnabled(
+      SetSystemProxyEnabledRequest(
+        isEnabled: isEnabled,
+        address: address,
+        supportSocks: supportSocks,
+      ),
+    );
+  }
+
   /// Asks the library in this process to undo what the engine's process left (the system proxy its
   /// inbound set) once that process has ended: a disable without an address does it (hiddify-core
   /// cleanupStoppedEngine). The library runs as the user, as the engine did.
   Future<void> _clearEngineLeftovers() async {
     try {
-      await fgClient
-          .setSystemProxyEnabled(SetSystemProxyEnabledRequest(isEnabled: false))
-          .timeout(const Duration(seconds: 5));
+      await _setSystemProxyEnabled(isEnabled: false).timeout(const Duration(seconds: 5));
     } catch (error) {
       loggy.warning('clearing what the engine left failed: $error');
     }
@@ -515,9 +619,7 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
     if (!_serviceSystemProxy) return;
     _serviceSystemProxy = false;
     try {
-      await fgClient
-          .setSystemProxyEnabled(SetSystemProxyEnabledRequest(isEnabled: false))
-          .timeout(const Duration(seconds: 5));
+      await _setSystemProxyEnabled(isEnabled: false).timeout(const Duration(seconds: 5));
     } catch (error) {
       loggy.warning('restoring the system proxy failed: $error');
     }
@@ -556,6 +658,12 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
   Future<bool> _isPrivileged() async {
     final cached = _privileged;
     if (cached != null) return cached;
+    final rustAdmin = hiddifyRust.isAdmin();
+    if (rustAdmin != null) {
+      loggy.debug('rust IsAdmin: $rustAdmin');
+      _privileged = rustAdmin;
+      return rustAdmin;
+    }
     // The in-process core checks its own token (hutils.IsAdmin): no `id -u` or
     // PowerShell child process, which antivirus heuristics score against a GUI app.
     try {

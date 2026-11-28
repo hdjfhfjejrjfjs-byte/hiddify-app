@@ -10,6 +10,10 @@ use percent_encoding::percent_decode_str;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+pub mod admin_service;
+pub mod fetch_url;
+pub mod system_proxy;
+
 /// Fallback obscured IP string when input is neither dotted IPv4 nor colon-separated IPv6.
 pub const FALLBACK_OBSCURED_ADDRESS: &str = "*.*.*.*";
 

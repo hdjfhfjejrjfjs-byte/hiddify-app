@@ -260,7 +260,7 @@ class FreeProfilesNotifier extends _$FreeProfilesNotifier with AppLogger {
     // The core first, as for a subscription: it trusts the roots it ships, which an old Android
     // (7.0 has no ISRG Root X1) lacks, and it does not take a filter's reset of Dart's handshake.
     try {
-      final rs = await core.fetchUrl(_url, userAgent: httpClient.userAgent, timeout: const Duration(seconds: 30));
+      final rs = await core.fetchUrlAsync(_url, userAgent: httpClient.userAgent, timeout: const Duration(seconds: 30));
       if (rs.error == FetchUrlError.FETCH_URL_ERROR_NONE && rs.statusCode == 200) {
         return _parse(utf8.decode(rs.body));
       }

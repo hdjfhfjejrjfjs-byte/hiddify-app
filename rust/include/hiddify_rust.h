@@ -227,6 +227,15 @@ char *hiddify_diagnostics_sanitize_report_text(const char *text);
 char *hiddify_diagnostics_list_core_crash_reports_json(const char *working_dir);
 char *hiddify_diagnostics_export_report_json(const char *request_json);
 
+/* Phase 4: FetchUrl, Desktop Admin Service Elevation & User System Proxy */
+char *hiddify_net_fetch_url_json(const char *request_json);
+int32_t hiddify_net_is_admin(void);
+int32_t hiddify_net_tun_allowed(void);
+char *hiddify_net_need_admin_bg_service_json(const char *request_json);
+char *hiddify_net_ensure_admin_bg_service_json(const char *request_json);
+char *hiddify_net_set_system_proxy_enabled_json(const char *request_json);
+char *hiddify_net_get_system_proxy_status_json(void);
+
 #ifdef __cplusplus
 }
 #endif

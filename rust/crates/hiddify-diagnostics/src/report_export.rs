@@ -17,7 +17,7 @@ use age::x25519::Recipient;
 use hiddify_config::sanitize_config_json;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -832,12 +832,19 @@ pub fn export_diagnostics_report(
         &sensitive.join("logs").join("box.log"),
     );
     let _ = fs::create_dir_all(&sensitive);
+    let core_running = matches!(
+        opts.core_state,
+        Some("STARTED" | "WAITING" | "HOT_RELOADING" | "NO_AVAILABLE_PROXIES")
+    );
+    let mut net_obj = Map::new();
+    net_obj.insert("coreRunning".to_string(), Value::Bool(core_running));
+    if let Some(ifaces) = collect_system_interfaces_json() {
+        net_obj.insert("interfaces".to_string(), ifaces);
+    }
     let net_json = format!(
         "{}\n",
-        serde_json::to_string_pretty(&json!({
-            "coreRunning": matches!(opts.core_state, Some("STARTED" | "WAITING" | "HOT_RELOADING" | "NO_AVAILABLE_PROXIES")),
-        }))
-        .unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string_pretty(&Value::Object(net_obj))
+            .unwrap_or_else(|_| "{}".to_string())
     );
     let _ = fs::write(sensitive.join("network.json"), net_json);
 
@@ -930,6 +937,409 @@ pub fn export_diagnostics_report(
         path: destination.to_string_lossy().into_owned(),
         encrypted: encrypt,
     })
+}
+
+// ============================================================================
+// Windows Network Interface & Default Route Diagnostics (`diagnostics_network_windows.go`)
+// ============================================================================
+
+pub const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsInterfaceDiagnostic {
+    pub index: u32,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub if_type: u32,
+    pub up: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipv4: Option<WindowsIpFamilyDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<WindowsIpFamilyDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsIpFamilyDiagnostic {
+    pub connected: bool,
+    pub disable_default_routes: bool,
+    pub metric: u32,
+    pub automatic_metric: bool,
+    pub forwarding: bool,
+    pub weak_host_send: bool,
+    pub addresses: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_route_metric: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawIpInterfaceEntry {
+    pub luid: u64,
+    pub index: u32,
+    pub name: String,
+    pub if_type: u32,
+    pub up: bool,
+    pub is_ipv6: bool,
+    pub connected: bool,
+    pub disable_default_routes: bool,
+    pub metric: u32,
+    pub automatic_metric: bool,
+    pub forwarding: bool,
+    pub weak_host_send: bool,
+}
+
+/// Aggregates raw IPv4/IPv6 interface rows, unicast address LUIDs, and route rows `(luid, prefix_len, metric, is_ipv6)`
+/// into the sorted list of active/default-route interfaces (`systemInterfaces()` in `diagnostics_network_windows.go`).
+pub fn aggregate_windows_interfaces(
+    ip_rows: &[RawIpInterfaceEntry],
+    unicast_luids: &[(u64, bool)],
+    routes: &[(u64, u8, u32, bool)],
+) -> Vec<WindowsInterfaceDiagnostic> {
+    let mut by_luid: BTreeMap<u64, WindowsInterfaceDiagnostic> = BTreeMap::new();
+
+    for row in ip_rows {
+        let family_state = WindowsIpFamilyDiagnostic {
+            connected: row.connected,
+            disable_default_routes: row.disable_default_routes,
+            metric: row.metric,
+            automatic_metric: row.automatic_metric,
+            forwarding: row.forwarding,
+            weak_host_send: row.weak_host_send,
+            addresses: 0,
+            default_route_metric: None,
+        };
+        let entry = by_luid
+            .entry(row.luid)
+            .or_insert_with(|| WindowsInterfaceDiagnostic {
+                index: row.index,
+                name: row.name.clone(),
+                if_type: row.if_type,
+                up: row.up,
+                ipv4: None,
+                ipv6: None,
+            });
+        if row.is_ipv6 {
+            entry.ipv6 = Some(family_state);
+        } else {
+            entry.ipv4 = Some(family_state);
+        }
+    }
+
+    for &(luid, is_ipv6) in unicast_luids {
+        if let Some(iface) = by_luid.get_mut(&luid) {
+            let state_opt = if is_ipv6 {
+                iface.ipv6.as_mut()
+            } else {
+                iface.ipv4.as_mut()
+            };
+            if let Some(state) = state_opt {
+                state.addresses += 1;
+            }
+        }
+    }
+
+    for &(luid, prefix_len, metric, is_ipv6) in routes {
+        if prefix_len != 0 {
+            continue;
+        }
+        if let Some(iface) = by_luid.get_mut(&luid) {
+            let state_opt = if is_ipv6 {
+                iface.ipv6.as_mut()
+            } else {
+                iface.ipv4.as_mut()
+            };
+            if let Some(state) = state_opt {
+                match state.default_route_metric {
+                    None => state.default_route_metric = Some(metric),
+                    Some(prev) if metric < prev => state.default_route_metric = Some(metric),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let has_default_route = |s: &Option<WindowsIpFamilyDiagnostic>| -> bool {
+        s.as_ref()
+            .and_then(|f| f.default_route_metric)
+            .is_some()
+    };
+
+    let mut list: Vec<WindowsInterfaceDiagnostic> = by_luid
+        .into_values()
+        .filter(|iface| {
+            iface.if_type != IF_TYPE_SOFTWARE_LOOPBACK
+                && (iface.up || has_default_route(&iface.ipv4) || has_default_route(&iface.ipv6))
+        })
+        .collect();
+    list.sort_by_key(|iface| iface.index);
+    list
+}
+
+fn collect_system_interfaces_json() -> Option<Value> {
+    #[cfg(target_os = "windows")]
+    {
+        let list = win_netio::collect_windows_interfaces();
+        serde_json::to_value(list).ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod win_netio {
+    use super::*;
+    use std::ffi::c_void;
+    use std::ptr;
+
+    const AF_INET: u16 = 2;
+    const AF_INET6: u16 = 23;
+    const IF_OPER_STATUS_UP: i32 = 1;
+
+    #[repr(C)]
+    struct MibIpInterfaceRow {
+        family: u16,
+        _pad0: [u8; 6],
+        interface_luid: u64,
+        interface_index: u32,
+        max_reassembly_size: u32,
+        interface_identifier: u64,
+        min_router_advertisement_interval: u32,
+        max_router_advertisement_interval: u32,
+        advertising_enabled: u8,
+        forwarding_enabled: u8,
+        weak_host_send: u8,
+        weak_host_receive: u8,
+        use_automatic_metric: u8,
+        use_neighbor_unreachability_detection: u8,
+        managed_address_configuration_supported: u8,
+        other_stateful_configuration_supported: u8,
+        advertise_default_route: u8,
+        _pad1: [u8; 3],
+        router_discovery_behavior: i32,
+        dad_transmits: u32,
+        base_reachable_time: u32,
+        retransmit_time: u32,
+        path_mtu_discovery_timeout: u32,
+        link_local_address_behavior: i32,
+        link_local_address_timeout: u32,
+        zone_indices: [u32; 16],
+        site_prefix_length: u32,
+        metric: u32,
+        nl_mtu: u32,
+        connected: u8,
+        supports_wake_up_patterns: u8,
+        supports_neighbor_discovery: u8,
+        supports_router_discovery: u8,
+        reachable_time: u32,
+        transmit_offload: u8,
+        receive_offload: u8,
+        disable_default_routes: u8,
+        _pad2: u8,
+    }
+
+    #[repr(C)]
+    struct MibIpInterfaceTable {
+        num_entries: u32,
+        _pad: u32,
+        table: [MibIpInterfaceRow; 1],
+    }
+
+    #[repr(C)]
+    struct MibIfRow2 {
+        interface_luid: u64,
+        interface_index: u32,
+        interface_guid: [u8; 16],
+        alias: [u16; 257],
+        description: [u16; 257],
+        physical_address_length: u32,
+        physical_address: [u8; 32],
+        permanent_physical_address: [u8; 32],
+        mtu: u32,
+        if_type: u32,
+        tunnel_type: i32,
+        media_type: i32,
+        physical_medium_type: i32,
+        access_type: i32,
+        direction_type: i32,
+        interface_and_oper_status_flags: u8,
+        _pad0: [u8; 3],
+        oper_status: i32,
+        admin_status: i32,
+        media_connect_state: i32,
+        network_guid: [u8; 16],
+        connection_type: i32,
+        _pad1: u32,
+        transmit_link_speed: u64,
+        receive_link_speed: u64,
+        in_octets: u64,
+        in_ucast_pkts: u64,
+        in_nucast_pkts: u64,
+        in_discards: u64,
+        in_errors: u64,
+        in_unknown_protos: u64,
+        in_ucast_octets: u64,
+        in_multicast_octets: u64,
+        in_broadcast_octets: u64,
+        out_octets: u64,
+        out_ucast_pkts: u64,
+        out_nucast_pkts: u64,
+        out_discards: u64,
+        out_errors: u64,
+        out_ucast_octets: u64,
+        out_multicast_octets: u64,
+        out_broadcast_octets: u64,
+        out_qlen: u64,
+    }
+
+    #[repr(C)]
+    struct MibUnicastIpAddressRow {
+        address: [u8; 28],
+        _pad0: u32,
+        interface_luid: u64,
+        interface_index: u32,
+        dad_state: i32,
+        valid_lifetime: u32,
+        preferred_lifetime: u32,
+        on_link_prefix_length: u8,
+        skip_as_source: u8,
+        _pad1: [u8; 2],
+        prefix_origin: i32,
+        suffix_origin: i32,
+        _pad2: u32,
+        creation_time_stamp: i64,
+    }
+
+    #[repr(C)]
+    struct MibUnicastIpAddressTable {
+        num_entries: u32,
+        _pad: u32,
+        table: [MibUnicastIpAddressRow; 1],
+    }
+
+    #[repr(C)]
+    struct MibIpForwardRow2 {
+        interface_luid: u64,
+        interface_index: u32,
+        destination_prefix: [u8; 28],
+        destination_prefix_length: u8,
+        _pad0: [u8; 3],
+        next_hop: [u8; 28],
+        site_prefix_length: u8,
+        _pad1: [u8; 3],
+        valid_lifetime: u32,
+        preferred_lifetime: u32,
+        metric: u32,
+        protocol: i32,
+        loopback: u8,
+        autoconfigure_address: u8,
+        publish: u8,
+        immortal: u8,
+        age: u32,
+        origin: i32,
+    }
+
+    #[repr(C)]
+    struct MibIpForwardTable2 {
+        num_entries: u32,
+        _pad: u32,
+        table: [MibIpForwardRow2; 1],
+    }
+
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetIpInterfaceTable(family: u16, table: *mut *mut MibIpInterfaceTable) -> u32;
+        fn GetIfEntry2(row: *mut MibIfRow2) -> u32;
+        fn GetUnicastIpAddressTable(
+            family: u16,
+            table: *mut *mut MibUnicastIpAddressTable,
+        ) -> u32;
+        fn GetIpForwardTable2(family: u16, table: *mut *mut MibIpForwardTable2) -> u32;
+        fn FreeMibTable(memory: *mut c_void);
+    }
+
+    fn query_if_meta(luid: u64) -> (String, u32, bool) {
+        unsafe {
+            let mut row: MibIfRow2 = std::mem::zeroed();
+            row.interface_luid = luid;
+            if GetIfEntry2(&mut row) != 0 {
+                return (String::new(), 0, false);
+            }
+            let end = row
+                .alias
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(row.alias.len());
+            let name = String::from_utf16_lossy(&row.alias[..end]);
+            (name, row.if_type, row.oper_status == IF_OPER_STATUS_UP)
+        }
+    }
+
+    pub fn collect_windows_interfaces() -> Vec<WindowsInterfaceDiagnostic> {
+        let mut ip_rows = Vec::new();
+        let mut unicast_luids = Vec::new();
+        let mut routes = Vec::new();
+        let mut meta_cache: BTreeMap<u64, (String, u32, bool)> = BTreeMap::new();
+
+        for &(family, is_ipv6) in &[(AF_INET, false), (AF_INET6, true)] {
+            unsafe {
+                let mut if_table: *mut MibIpInterfaceTable = ptr::null_mut();
+                if GetIpInterfaceTable(family, &mut if_table) == 0 && !if_table.is_null() {
+                    let count = (*if_table).num_entries as usize;
+                    let slice = std::slice::from_raw_parts((*if_table).table.as_ptr(), count);
+                    for row in slice {
+                        let (name, if_type, up) = meta_cache
+                            .entry(row.interface_luid)
+                            .or_insert_with(|| query_if_meta(row.interface_luid))
+                            .clone();
+                        ip_rows.push(RawIpInterfaceEntry {
+                            luid: row.interface_luid,
+                            index: row.interface_index,
+                            name,
+                            if_type,
+                            up,
+                            is_ipv6,
+                            connected: row.connected != 0,
+                            disable_default_routes: row.disable_default_routes != 0,
+                            metric: row.metric,
+                            automatic_metric: row.use_automatic_metric != 0,
+                            forwarding: row.forwarding_enabled != 0,
+                            weak_host_send: row.weak_host_send != 0,
+                        });
+                    }
+                    FreeMibTable(if_table as *mut c_void);
+                }
+
+                let mut addr_table: *mut MibUnicastIpAddressTable = ptr::null_mut();
+                if GetUnicastIpAddressTable(family, &mut addr_table) == 0 && !addr_table.is_null() {
+                    let count = (*addr_table).num_entries as usize;
+                    let slice = std::slice::from_raw_parts((*addr_table).table.as_ptr(), count);
+                    for row in slice {
+                        unicast_luids.push((row.interface_luid, is_ipv6));
+                    }
+                    FreeMibTable(addr_table as *mut c_void);
+                }
+
+                let mut fwd_table: *mut MibIpForwardTable2 = ptr::null_mut();
+                if GetIpForwardTable2(family, &mut fwd_table) == 0 && !fwd_table.is_null() {
+                    let count = (*fwd_table).num_entries as usize;
+                    let slice = std::slice::from_raw_parts((*fwd_table).table.as_ptr(), count);
+                    for row in slice {
+                        routes.push((
+                            row.interface_luid,
+                            row.destination_prefix_length,
+                            row.metric,
+                            is_ipv6,
+                        ));
+                    }
+                    FreeMibTable(fwd_table as *mut c_void);
+                }
+            }
+        }
+
+        aggregate_windows_interfaces(&ip_rows, &unicast_luids, &routes)
+    }
 }
 
 #[cfg(test)]
@@ -1214,5 +1624,87 @@ mod tests {
         assert_eq!(report_name(dir.path(), "stamp", false, false), "hiddify-002.zip");
         assert_eq!(report_name(dir.path(), "stamp", true, false), "hiddify-stamp.zip");
         assert_eq!(report_name(dir.path(), "stamp", false, false), "hiddify-003.zip");
+    }
+
+    #[test]
+    fn windows_interface_aggregation_matches_go_diagnostics_network() {
+        let ip_rows = vec![
+            RawIpInterfaceEntry {
+                luid: 100,
+                index: 1,
+                name: "Loopback Pseudo-Interface 1".to_string(),
+                if_type: IF_TYPE_SOFTWARE_LOOPBACK,
+                up: true,
+                is_ipv6: false,
+                connected: true,
+                disable_default_routes: false,
+                metric: 75,
+                automatic_metric: true,
+                forwarding: false,
+                weak_host_send: false,
+            },
+            RawIpInterfaceEntry {
+                luid: 200,
+                index: 12,
+                name: "Wi-Fi".to_string(),
+                if_type: 71,
+                up: true,
+                is_ipv6: false,
+                connected: true,
+                disable_default_routes: true,
+                metric: 35,
+                automatic_metric: true,
+                forwarding: false,
+                weak_host_send: false,
+            },
+            RawIpInterfaceEntry {
+                luid: 200,
+                index: 12,
+                name: "Wi-Fi".to_string(),
+                if_type: 71,
+                up: true,
+                is_ipv6: true,
+                connected: true,
+                disable_default_routes: false,
+                metric: 35,
+                automatic_metric: true,
+                forwarding: false,
+                weak_host_send: false,
+            },
+            RawIpInterfaceEntry {
+                luid: 300,
+                index: 5,
+                name: "Ethernet".to_string(),
+                if_type: 6,
+                up: false,
+                is_ipv6: false,
+                connected: false,
+                disable_default_routes: false,
+                metric: 25,
+                automatic_metric: true,
+                forwarding: false,
+                weak_host_send: false,
+            },
+        ];
+        let unicast = vec![(200, false), (200, false), (200, true)];
+        let routes = vec![(200, 0, 50, false), (200, 0, 20, false), (200, 24, 5, false)];
+
+        let list = aggregate_windows_interfaces(&ip_rows, &unicast, &routes);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].index, 12);
+        assert_eq!(list[0].name, "Wi-Fi");
+        let ipv4 = list[0].ipv4.as_ref().unwrap();
+        assert!(ipv4.disable_default_routes);
+        assert_eq!(ipv4.addresses, 2);
+        assert_eq!(ipv4.default_route_metric, Some(20));
+        let ipv6 = list[0].ipv6.as_ref().unwrap();
+        assert_eq!(ipv6.addresses, 1);
+        assert_eq!(ipv6.default_route_metric, None);
+
+        let val = serde_json::to_value(&list[0]).unwrap();
+        assert_eq!(val["type"], 71);
+        assert_eq!(val["ipv4"]["disableDefaultRoutes"], true);
+        assert_eq!(val["ipv4"]["defaultRouteMetric"], 20);
+        assert!(val["ipv6"].get("defaultRouteMetric").is_none());
     }
 }

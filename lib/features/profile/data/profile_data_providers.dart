@@ -43,9 +43,12 @@ ProfileParser profileParser(Ref ref) {
   return ProfileParser(
     httpClient: ref.watch(httpClientProvider),
     coreFetch: (url, userAgent, {required cancel}) {
-      final call = core.fetchUrl(url, userAgent: userAgent, timeout: const Duration(seconds: 30));
-      unawaited(cancel.then((_) => call.cancel()));
-      return call;
+      return core.fetchUrlAsync(
+        url,
+        userAgent: userAgent,
+        timeout: const Duration(seconds: 30),
+        cancel: cancel,
+      );
     },
   );
 }

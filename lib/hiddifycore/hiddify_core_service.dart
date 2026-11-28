@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -88,6 +89,52 @@ class HiddifyCoreService with InfraLogger {
   /// stop it. A status other than 2xx is a response, not an error.
   ResponseFuture<FetchUrlResponse> fetchUrl(String url, {required String userAgent, required Duration timeout}) =>
       core.fgClient.fetchUrl(FetchUrlRequest(url: url, userAgent: userAgent, timeoutMs: timeout.inMilliseconds));
+
+  /// Downloads [url] via `libhiddify_rust` (`hiddify_net::fetch_url`) in a background Isolate when
+  /// available, falling back to `fgClient.fetchUrl`.
+  Future<FetchUrlResponse> fetchUrlAsync(
+    String url, {
+    required String userAgent,
+    required Duration timeout,
+    Future<void>? cancel,
+  }) async {
+    if (hiddifyRust.isAvailable) {
+      final timeoutMs = timeout.inMilliseconds;
+      final rustFuture = Isolate.run(
+        () => hiddifyRust.fetchUrl(url: url, userAgent: userAgent, timeoutMs: timeoutMs),
+      );
+      final outcome = cancel == null
+          ? await rustFuture
+          : await Future.any<
+              ({
+                int statusCode,
+                List<({String name, String value})> headers,
+                Uint8List body,
+                int error,
+                String errorDetail,
+              })?
+            >([
+              rustFuture,
+              cancel.then((_) => throw const GrpcError.cancelled('cancelled')),
+            ]);
+      if (outcome != null) {
+        return FetchUrlResponse(
+          statusCode: outcome.statusCode,
+          headers: [
+            for (final h in outcome.headers) HttpHeader(name: h.name, value: h.value),
+          ],
+          body: outcome.body,
+          error: FetchUrlError.valueOf(outcome.error) ?? FetchUrlError.FETCH_URL_ERROR_OTHER,
+          errorDetail: outcome.errorDetail,
+        );
+      }
+    }
+    final call = fetchUrl(url, userAgent: userAgent, timeout: timeout);
+    if (cancel != null) {
+      unawaited(cancel.then((_) => call.cancel()));
+    }
+    return call;
+  }
 
   TaskEither<String, String> generateFullConfigByPath(String path) {
     return TaskEither(() async {

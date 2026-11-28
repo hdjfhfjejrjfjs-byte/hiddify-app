@@ -169,4 +169,55 @@ class HiddifyRustNative {
     String? coreCommit,
     String? coreState,
   }) => null;
+
+  ({
+    int statusCode,
+    List<({String name, String value})> headers,
+    Uint8List body,
+    int error,
+    String errorDetail,
+  })?
+  fetchUrl({
+    required String url,
+    String userAgent = '',
+    int timeoutMs = 30000,
+  }) => null;
+
+  bool? isAdmin() => null;
+  bool? tunAllowed() => null;
+
+  ({
+    int decision,
+    List<({String tag, String summary, String detail})> adminNeededProxies,
+  })?
+  needAdminBgService({
+    required String serviceMode,
+    required String hiddifySettingsJson,
+    required int adminPreference,
+    bool privilegeErrorRemembered = false,
+    String? cliPath,
+    String? buildId,
+  }) => null;
+
+  List<({int progress, String message, int servicePort})>? ensureAdminBgService({
+    required String configContent,
+    required String configName,
+    required String settingsJson,
+    required Map<String, List<int>> resources,
+    required bool disableMemoryLimit,
+    required int ownerPid,
+    required String cliPath,
+    required String ownerUser,
+    required bool proxyOnly,
+    String? buildId,
+  }) => null;
+
+  ({bool ok, String message})? setSystemProxyEnabled({
+    String? workingDir,
+    required bool isEnabled,
+    String address = '',
+    bool supportSocks = false,
+  }) => null;
+
+  ({bool available, bool enabled})? getSystemProxyStatus() => null;
 }
