@@ -21,6 +21,9 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::cancel::is_cancelled;
+use crate::proxy_dial::{dial_http_proxy_connect, LocalHttpProxySpec};
+
 pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const FETCH_URL_BODY_MAX: usize = 16 << 20; // 16 MiB
@@ -92,9 +95,10 @@ enum StageError {
     HttpIo(io::Error),
     Protocol(String),
     DeadlineExceeded,
+    Cancelled,
 }
 
-fn system_and_bundled_roots() -> Arc<RootCertStore> {
+pub(crate) fn system_and_bundled_roots() -> Arc<RootCertStore> {
     static ROOTS: OnceLock<Arc<RootCertStore>> = OnceLock::new();
     ROOTS
         .get_or_init(|| {
@@ -109,7 +113,7 @@ fn system_and_bundled_roots() -> Arc<RootCertStore> {
         .clone()
 }
 
-fn build_tls_config(custom_roots: Option<Arc<RootCertStore>>) -> Result<Arc<ClientConfig>, String> {
+pub(crate) fn build_tls_config(custom_roots: Option<Arc<RootCertStore>>) -> Result<Arc<ClientConfig>, String> {
     let roots = custom_roots.unwrap_or_else(system_and_bundled_roots);
     let provider = Arc::new(rustls_rustcrypto::provider());
     let mut cfg = ClientConfig::builder_with_provider(provider)
@@ -132,6 +136,22 @@ pub fn fetch_url_with_roots(
     req: &FetchUrlRequest,
     custom_roots: Option<Arc<RootCertStore>>,
 ) -> Result<FetchUrlOutcome, String> {
+    fetch_url_ext(req, None, false, 0, custom_roots)
+}
+
+/// Extended `fetch_url` supporting optional local HTTP mixed proxy (`"PROXY 127.0.0.1:<port>; DIRECT"`)
+/// and cooperative task cancellation (`cancel_task_id`).
+/// Returns `Err("cancelled")` if `cancel_task_id` is cancelled before or during the transfer.
+pub fn fetch_url_ext(
+    req: &FetchUrlRequest,
+    proxy: Option<&LocalHttpProxySpec>,
+    fallback_direct: bool,
+    cancel_task_id: u64,
+    custom_roots: Option<Arc<RootCertStore>>,
+) -> Result<FetchUrlOutcome, String> {
+    if is_cancelled(cancel_task_id) {
+        return Err("cancelled".to_string());
+    }
     let initial = Url::parse(&req.url).map_err(|e| format!("parse url: {e}"))?;
     match initial.scheme() {
         "http" | "https" => {}
@@ -148,8 +168,22 @@ pub fn fetch_url_with_roots(
 
     let mut current_url = initial;
     for _hop in 0..=MAX_REDIRECTS {
-        match round_trip_once(&current_url, &req.user_agent, deadline, &tls_config) {
+        if is_cancelled(cancel_task_id) {
+            return Err("cancelled".to_string());
+        }
+        match round_trip_with_proxy(
+            &current_url,
+            &req.user_agent,
+            deadline,
+            &tls_config,
+            proxy,
+            fallback_direct,
+            cancel_task_id,
+        ) {
             Ok((status_code, headers, body)) => {
+                if is_cancelled(cancel_task_id) {
+                    return Err("cancelled".to_string());
+                }
                 if matches!(status_code, 301 | 302 | 303 | 307 | 308) {
                     if let Some(loc) = headers
                         .iter()
@@ -178,7 +212,11 @@ pub fn fetch_url_with_roots(
                     error_detail: String::new(),
                 });
             }
+            Err(StageError::Cancelled) => return Err("cancelled".to_string()),
             Err(stage_err) => {
+                if is_cancelled(cancel_task_id) {
+                    return Err("cancelled".to_string());
+                }
                 let (code, detail) = classify_stage_error(stage_err);
                 return Ok(FetchUrlOutcome::from_error(code, detail));
             }
@@ -240,11 +278,38 @@ fn dial_tcp(addrs: &[SocketAddr], deadline: Instant) -> Result<TcpStream, StageE
     })))
 }
 
-fn round_trip_once(
+fn round_trip_with_proxy(
     url: &Url,
     user_agent: &str,
     deadline: Instant,
     tls_config: &Arc<ClientConfig>,
+    proxy: Option<&LocalHttpProxySpec>,
+    fallback_direct: bool,
+    cancel_task_id: u64,
+) -> Result<(i32, Vec<FetchHttpHeader>, Vec<u8>), StageError> {
+    if is_cancelled(cancel_task_id) {
+        return Err(StageError::Cancelled);
+    }
+    if let Some(p) = proxy.filter(|p| p.is_enabled()) {
+        match round_trip_via_http_proxy(url, user_agent, deadline, tls_config, p, cancel_task_id) {
+            Ok(res) => return Ok(res),
+            Err(StageError::Cancelled) => return Err(StageError::Cancelled),
+            Err(_proxy_err) if fallback_direct => {
+                // Local proxy not listening or refused -> fall through to DIRECT ("PROXY 127.0.0.1:port; DIRECT")
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    round_trip_once(url, user_agent, deadline, tls_config, cancel_task_id)
+}
+
+fn round_trip_via_http_proxy(
+    url: &Url,
+    user_agent: &str,
+    deadline: Instant,
+    tls_config: &Arc<ClientConfig>,
+    proxy: &LocalHttpProxySpec,
+    cancel_task_id: u64,
 ) -> Result<(i32, Vec<FetchHttpHeader>, Vec<u8>), StageError> {
     let host = url
         .host_str()
@@ -268,55 +333,152 @@ fn round_trip_once(
         None => host.to_string(),
     };
 
-    let addrs = resolve_host_addrs(host, port)?;
-    let mut tcp = dial_tcp(&addrs, deadline)?;
-
     if url.scheme() == "https" {
-        let clean_host = host.trim_start_matches('[').trim_end_matches(']');
-        let server_name = ServerName::try_from(clean_host.to_string())
-            .map_err(|e| StageError::TlsHandshake(format!("tls handshake: {e}")))?;
-        let mut conn = ClientConnection::new(tls_config.clone(), server_name)
-            .map_err(|e| StageError::TlsHandshake(format!("tls handshake: {e}")))?;
-
-        while conn.is_handshaking() {
-            let rem = remaining_timeout(deadline)?;
-            let _ = tcp.set_read_timeout(Some(rem));
-            let _ = tcp.set_write_timeout(Some(rem));
-            match conn.complete_io(&mut tcp) {
-                Ok(_) => {}
-                Err(io_err) => {
-                    // Check if rustls buffered a certificate or alert error before failing I/O
-                    return Err(StageError::TlsHandshakeIo(io_err));
-                }
-            }
-        }
-        // Flush any remaining post-handshake flight
-        if conn.wants_write() {
-            let _ = conn.complete_io(&mut tcp);
-        }
-
-        let negotiated_alpn = conn.alpn_protocol().map(|p| p.to_vec());
-        let mut tls_stream = StreamOwned::new(conn, tcp);
-        if negotiated_alpn.as_deref() == Some(b"h2") {
-            return exchange_h2(
-                &mut tls_stream,
-                "https",
-                &authority,
-                &path_and_query,
-                user_agent,
-                deadline,
-            );
-        }
-        return exchange_http11(
-            &mut tls_stream,
+        let tcp = dial_http_proxy_connect(proxy, host, port, user_agent, deadline)
+            .map_err(StageError::Dial)?;
+        return finish_tls_round_trip(
+            tcp,
+            host,
             &authority,
             &path_and_query,
             user_agent,
             deadline,
+            tls_config,
+            cancel_task_id,
         );
     }
 
-    exchange_http11(&mut tcp, &authority, &path_and_query, user_agent, deadline)
+    // Plain HTTP via HTTP proxy: send full absolute-form request target + optional Proxy-Authorization
+    let mut tcp = crate::proxy_dial::connect_tcp_with_deadline("127.0.0.1", proxy.port, deadline)
+        .map_err(StageError::Dial)?;
+    exchange_http11_ext(
+        &mut tcp,
+        &authority,
+        url.as_str(),
+        user_agent,
+        proxy.proxy_authorization_header().as_deref(),
+        deadline,
+        cancel_task_id,
+    )
+}
+
+fn round_trip_once(
+    url: &Url,
+    user_agent: &str,
+    deadline: Instant,
+    tls_config: &Arc<ClientConfig>,
+    cancel_task_id: u64,
+) -> Result<(i32, Vec<FetchHttpHeader>, Vec<u8>), StageError> {
+    if is_cancelled(cancel_task_id) {
+        return Err(StageError::Cancelled);
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| StageError::Protocol("missing host".to_string()))?;
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+    let path_and_query = match url.query() {
+        Some(q) => format!("{}?{q}", url.path()),
+        None => {
+            let p = url.path();
+            if p.is_empty() {
+                "/".to_string()
+            } else {
+                p.to_string()
+            }
+        }
+    };
+    let authority = match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    };
+
+    let addrs = resolve_host_addrs(host, port)?;
+    if is_cancelled(cancel_task_id) {
+        return Err(StageError::Cancelled);
+    }
+    let mut tcp = dial_tcp(&addrs, deadline)?;
+
+    if url.scheme() == "https" {
+        return finish_tls_round_trip(
+            tcp,
+            host,
+            &authority,
+            &path_and_query,
+            user_agent,
+            deadline,
+            tls_config,
+            cancel_task_id,
+        );
+    }
+
+    exchange_http11_ext(
+        &mut tcp,
+        &authority,
+        &path_and_query,
+        user_agent,
+        None,
+        deadline,
+        cancel_task_id,
+    )
+}
+
+fn finish_tls_round_trip(
+    mut tcp: TcpStream,
+    host: &str,
+    authority: &str,
+    path_and_query: &str,
+    user_agent: &str,
+    deadline: Instant,
+    tls_config: &Arc<ClientConfig>,
+    cancel_task_id: u64,
+) -> Result<(i32, Vec<FetchHttpHeader>, Vec<u8>), StageError> {
+    let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+    let server_name = ServerName::try_from(clean_host.to_string())
+        .map_err(|e| StageError::TlsHandshake(format!("tls handshake: {e}")))?;
+    let mut conn = ClientConnection::new(tls_config.clone(), server_name)
+        .map_err(|e| StageError::TlsHandshake(format!("tls handshake: {e}")))?;
+
+    while conn.is_handshaking() {
+        if is_cancelled(cancel_task_id) {
+            return Err(StageError::Cancelled);
+        }
+        let rem = remaining_timeout(deadline)?;
+        let _ = tcp.set_read_timeout(Some(rem));
+        let _ = tcp.set_write_timeout(Some(rem));
+        match conn.complete_io(&mut tcp) {
+            Ok(_) => {}
+            Err(io_err) => {
+                return Err(StageError::TlsHandshakeIo(io_err));
+            }
+        }
+    }
+    if conn.wants_write() {
+        let _ = conn.complete_io(&mut tcp);
+    }
+
+    let negotiated_alpn = conn.alpn_protocol().map(|p| p.to_vec());
+    let mut tls_stream = StreamOwned::new(conn, tcp);
+    if negotiated_alpn.as_deref() == Some(b"h2") {
+        return exchange_h2(
+            &mut tls_stream,
+            "https",
+            authority,
+            path_and_query,
+            user_agent,
+            deadline,
+        );
+    }
+    exchange_http11_ext(
+        &mut tls_stream,
+        authority,
+        path_and_query,
+        user_agent,
+        None,
+        deadline,
+        cancel_task_id,
+    )
 }
 
 fn map_stream_io_error(err: io::Error, in_handshake: bool) -> StageError {
@@ -347,19 +509,27 @@ fn is_cert_error_message(lower: &str) -> bool {
 // HTTP/1.1 Exchange (with gzip transparent decompression)
 // ============================================================================
 
-fn exchange_http11<S: Read + Write>(
+fn exchange_http11_ext<S: Read + Write>(
     stream: &mut S,
     authority: &str,
-    path_and_query: &str,
+    request_target: &str,
     user_agent: &str,
+    proxy_auth: Option<&str>,
     deadline: Instant,
+    cancel_task_id: u64,
 ) -> Result<(i32, Vec<FetchHttpHeader>, Vec<u8>), StageError> {
+    if is_cancelled(cancel_task_id) {
+        return Err(StageError::Cancelled);
+    }
     let _ = remaining_timeout(deadline)?;
     let mut req_buf = String::with_capacity(256);
-    req_buf.push_str(&format!("GET {path_and_query} HTTP/1.1\r\n"));
+    req_buf.push_str(&format!("GET {request_target} HTTP/1.1\r\n"));
     req_buf.push_str(&format!("Host: {authority}\r\n"));
     if !user_agent.is_empty() {
         req_buf.push_str(&format!("User-Agent: {user_agent}\r\n"));
+    }
+    if let Some(auth) = proxy_auth {
+        req_buf.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
     }
     req_buf.push_str("Accept: */*\r\n");
     req_buf.push_str("Accept-Language: en-US,en;q=0.9\r\n");
@@ -1032,6 +1202,7 @@ fn decode_hpack_huffman(raw: &[u8]) -> Result<Vec<u8>, StageError> {
 
 fn classify_stage_error(err: StageError) -> (FetchUrlError, String) {
     match err {
+        StageError::Cancelled => (FetchUrlError::Other, "cancelled".to_string()),
         StageError::Dns(msg) => (FetchUrlError::Dns, msg),
         StageError::DeadlineExceeded => (FetchUrlError::Timeout, "i/o timeout".to_string()),
         StageError::TlsCertificate(msg) => (FetchUrlError::Certificate, msg),

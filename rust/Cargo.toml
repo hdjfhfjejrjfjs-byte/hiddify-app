@@ -16,8 +16,11 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/hiddify/hiddify-app"
 
 [workspace.dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
 age = { version = "0.11", default-features = false }
 base64 = "0.22"
+chacha20poly1305 = "0.10"
 der = { version = "0.7", features = ["pem", "std"] }
 flate2 = "1.0"
 indexmap = { version = "2.6", features = ["serde"] }

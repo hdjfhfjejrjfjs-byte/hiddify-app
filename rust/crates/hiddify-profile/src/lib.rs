@@ -17,6 +17,7 @@ use url::Url;
 use zip::ZipArchive;
 
 pub mod download;
+pub mod pipeline;
 
 /// Synthetic sentinel base (`1000 TiB`) for unlimited subscription traffic (`total = 0` or missing).
 pub const INFINITE_TRAFFIC_THRESHOLD: i64 = 1_099_511_627_776_000;

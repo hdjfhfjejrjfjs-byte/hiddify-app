@@ -195,6 +195,18 @@ typedef _ResolveNameDart =
 typedef _UpdateIntervalNative = ffi.Int64 Function(ffi.Pointer<Utf8>, ffi.Bool, ffi.Int64, ffi.Bool);
 typedef _UpdateIntervalDart = int Function(ffi.Pointer<Utf8>, bool, int, bool);
 
+typedef _NoArgU64Native = ffi.Uint64 Function();
+typedef _NoArgU64Dart = int Function();
+
+typedef _U64ToBoolNative = ffi.Int32 Function(ffi.Uint64);
+typedef _U64ToBoolDart = int Function(int);
+
+typedef _U64VoidNative = ffi.Void Function(ffi.Uint64);
+typedef _U64VoidDart = void Function(int);
+
+typedef _U64ToStrNative = ffi.Pointer<Utf8> Function(ffi.Uint64);
+typedef _U64ToStrDart = ffi.Pointer<Utf8> Function(int);
+
 /// Cross-platform `dart:ffi` loader and bindings for `libhiddify_rust` across
 /// iOS (`XCFramework` static symbols), Android (`jniLibs`), macOS (`dylib`/`XCFramework`), and Linux (`bundle/lib`).
 class HiddifyRustNative {
@@ -211,7 +223,7 @@ class HiddifyRustNative {
       try {
         final lib = candidate();
         final b = _Bindings(lib);
-        if (b.abiVersion() == 4) {
+        if (b.abiVersion() == 5) {
           return b;
         }
       } catch (_) {
@@ -1346,6 +1358,260 @@ class HiddifyRustNative {
       enabled: (map['enabled'] as bool?) ?? false,
     );
   }
+
+  // --- Phase 5 (C-ABI v5): Task Cancellation, Update Download, LAN Servers, Health & Pipeline ---
+
+  int? createTask() {
+    final b = _bindings;
+    if (b == null) return null;
+    final id = b.createTask();
+    return id == 0 ? null : id;
+  }
+
+  bool? cancelTask(int taskId) {
+    final b = _bindings;
+    if (b == null) return null;
+    return _toBool(b.cancelTask(taskId));
+  }
+
+  void removeTask(int taskId) {
+    final b = _bindings;
+    if (b == null || taskId == 0) return;
+    b.removeTask(taskId);
+  }
+
+  ({int receivedBytes, int totalBytes, bool cancelled, bool finished})? taskProgress(int taskId) {
+    final b = _bindings;
+    if (b == null || taskId == 0) return null;
+    final raw = _readAndFree(b.taskProgressJson(taskId));
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      receivedBytes: (map['receivedBytes'] as num).toInt(),
+      totalBytes: (map['totalBytes'] as num).toInt(),
+      cancelled: (map['cancelled'] as bool?) ?? false,
+      finished: (map['finished'] as bool?) ?? false,
+    );
+  }
+
+  ({String status, String path, int bytesWritten, String? error})? downloadUpdateVerified({
+    required String url,
+    required String destinationPath,
+    required int expectedSize,
+    required String expectedSha256,
+    String userAgent = '',
+    int proxyPort = 0,
+    String proxySecret = '',
+    int cancelTaskId = 0,
+    int timeoutMs = 30000,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      'url': url,
+      'destinationPath': destinationPath,
+      'expectedSize': expectedSize,
+      'expectedSha256': expectedSha256,
+      'userAgent': userAgent,
+      'proxyPort': proxyPort,
+      'proxySecret': proxySecret,
+      'cancelTaskId': cancelTaskId,
+      'timeoutMs': timeoutMs,
+    });
+    final raw = _callStrToStr(b.downloadUpdateVerifiedJson, reqJson);
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      status: map['status'] as String,
+      path: map['path'] as String,
+      bytesWritten: (map['bytesWritten'] as num).toInt(),
+      error: map['error'] as String?,
+    );
+  }
+
+  Map<String, dynamic>? healthCheck({
+    String target = 'google.com',
+    String proxyAddr = '',
+    bool checkDns = false,
+    bool checkHttp = true,
+    bool checkQuic = false,
+    String dnsServer = '1.1.1.1:53',
+    int timeoutMs = 15000,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      'target': target,
+      'proxyAddr': proxyAddr,
+      'checkDns': checkDns,
+      'checkHttp': checkHttp,
+      'checkQuic': checkQuic,
+      'dnsServer': dnsServer,
+      'timeoutMs': timeoutMs,
+    });
+    final raw = _callStrToStr(b.healthCheckJson, reqJson);
+    if (raw == null) return null;
+    return jsonDecode(raw) as Map<String, dynamic>;
+  }
+
+  ({int handle, String url, String host, int port, String token})? phoneImportServerStart({
+    required String bindIp,
+    required Map<String, dynamic> pageText,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = using((arena) {
+      final ipPtr = bindIp.toNativeUtf8(allocator: arena);
+      final txtPtr = jsonEncode(pageText).toNativeUtf8(allocator: arena);
+      return _readAndFree(b.phoneImportServerStartJson(ipPtr, txtPtr));
+    });
+    if (raw == null) return null;
+    final outer = jsonDecode(raw) as Map<String, dynamic>;
+    if (outer['ok'] != true) {
+      throw SocketException((outer['error'] as String?) ?? 'failed to start PhoneImportServer');
+    }
+    final info = outer['info'] as Map<String, dynamic>;
+    return (
+      handle: (info['handle'] as num).toInt(),
+      url: info['url'] as String,
+      host: info['host'] as String,
+      port: (info['port'] as num).toInt(),
+      token: info['token'] as String,
+    );
+  }
+
+  ({bool locked, List<({String text, String fromIp, int timestampMs})> entries})? phoneImportServerPoll(
+    int handle,
+  ) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    final raw = _readAndFree(b.phoneImportServerPollJson(handle));
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    final list = <({String text, String fromIp, int timestampMs})>[];
+    for (final item in (map['entries'] as List<dynamic>? ?? const [])) {
+      if (item is Map<String, dynamic>) {
+        list.add((
+          text: item['text'] as String,
+          fromIp: item['fromIp'] as String,
+          timestampMs: (item['timestampMs'] as num).toInt(),
+        ));
+      }
+    }
+    return (locked: (map['locked'] as bool?) ?? false, entries: list);
+  }
+
+  bool? phoneImportServerIsLocked(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.phoneImportServerIsLocked(handle));
+  }
+
+  bool? phoneImportServerHandled(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.phoneImportServerHandled(handle));
+  }
+
+  bool? phoneImportServerClose(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.phoneImportServerClose(handle));
+  }
+
+  ({int handle, String url, String host, int port, String token})? lanFileServerStart({
+    required String bindIp,
+    required String filePath,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = using((arena) {
+      final ipPtr = bindIp.toNativeUtf8(allocator: arena);
+      final pathPtr = filePath.toNativeUtf8(allocator: arena);
+      return _readAndFree(b.lanFileServerStartJson(ipPtr, pathPtr));
+    });
+    if (raw == null) return null;
+    final outer = jsonDecode(raw) as Map<String, dynamic>;
+    if (outer['ok'] != true) {
+      throw SocketException((outer['error'] as String?) ?? 'failed to start LanFileServer');
+    }
+    final info = outer['info'] as Map<String, dynamic>;
+    return (
+      handle: (info['handle'] as num).toInt(),
+      url: info['url'] as String,
+      host: info['host'] as String,
+      port: (info['port'] as num).toInt(),
+      token: info['token'] as String,
+    );
+  }
+
+  List<String>? lanFileServerPoll(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    final raw = _readAndFree(b.lanFileServerPollJson(handle));
+    if (raw == null) return null;
+    return [for (final ip in (jsonDecode(raw) as List<dynamic>)) ip as String];
+  }
+
+  bool? lanFileServerClose(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.lanFileServerClose(handle));
+  }
+
+  Map<String, dynamic>? fetchAndPrepareRemoteAttempt(Map<String, dynamic> request) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _callStrToStr(b.fetchAndPrepareRemoteAttemptJson, jsonEncode(request));
+    if (raw == null) return null;
+    return jsonDecode(raw) as Map<String, dynamic>;
+  }
+
+  Map<String, dynamic>? finalizeDownloadedRemote(Map<String, dynamic> request) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _callStrToStr(b.finalizeDownloadedRemoteJson, jsonEncode(request));
+    if (raw == null) return null;
+    return jsonDecode(raw) as Map<String, dynamic>;
+  }
+
+  Map<String, dynamic>? prepareLocalProfile(Map<String, dynamic> request) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _callStrToStr(b.prepareLocalProfileJson, jsonEncode(request));
+    if (raw == null) return null;
+    return jsonDecode(raw) as Map<String, dynamic>;
+  }
+
+  ({String status, String? text, String? error})? expandLinksNative({
+    required String text,
+    bool decodeBase64First = false,
+    String userAgent = '',
+    int proxyPort = 0,
+    String proxySecret = '',
+    int timeoutMs = 15000,
+    int cancelTaskId = 0,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      'text': text,
+      'decodeBase64First': decodeBase64First,
+      'userAgent': userAgent,
+      'proxyPort': proxyPort,
+      'proxySecret': proxySecret,
+      'timeoutMs': timeoutMs,
+      'cancelTaskId': cancelTaskId,
+    });
+    final raw = _callStrToStr(b.expandLinksNativeJson, reqJson);
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      status: map['status'] as String,
+      text: map['text'] as String?,
+      error: map['error'] as String?,
+    );
+  }
 }
 
 class _Bindings {
@@ -1635,6 +1901,60 @@ class _Bindings {
       ),
       getSystemProxyStatusJson = lib.lookupFunction<_NoArgStrNative, _NoArgStrDart>(
         'hiddify_net_get_system_proxy_status_json',
+      ),
+      createTask = lib.lookupFunction<_NoArgU64Native, _NoArgU64Dart>(
+        'hiddify_net_create_task',
+      ),
+      cancelTask = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_cancel_task',
+      ),
+      removeTask = lib.lookupFunction<_U64VoidNative, _U64VoidDart>(
+        'hiddify_net_remove_task',
+      ),
+      taskProgressJson = lib.lookupFunction<_U64ToStrNative, _U64ToStrDart>(
+        'hiddify_net_task_progress_json',
+      ),
+      downloadUpdateVerifiedJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_download_update_verified_json',
+      ),
+      healthCheckJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_health_check_json',
+      ),
+      phoneImportServerStartJson = lib.lookupFunction<_Str2ToStrNative, _Str2ToStrDart>(
+        'hiddify_net_phone_import_server_start_json',
+      ),
+      phoneImportServerPollJson = lib.lookupFunction<_U64ToStrNative, _U64ToStrDart>(
+        'hiddify_net_phone_import_server_poll_json',
+      ),
+      phoneImportServerIsLocked = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_phone_import_server_is_locked',
+      ),
+      phoneImportServerHandled = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_phone_import_server_handled',
+      ),
+      phoneImportServerClose = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_phone_import_server_close',
+      ),
+      lanFileServerStartJson = lib.lookupFunction<_Str2ToStrNative, _Str2ToStrDart>(
+        'hiddify_net_lan_file_server_start_json',
+      ),
+      lanFileServerPollJson = lib.lookupFunction<_U64ToStrNative, _U64ToStrDart>(
+        'hiddify_net_lan_file_server_poll_json',
+      ),
+      lanFileServerClose = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_lan_file_server_close',
+      ),
+      fetchAndPrepareRemoteAttemptJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_profile_fetch_and_prepare_remote_attempt_json',
+      ),
+      finalizeDownloadedRemoteJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_profile_finalize_downloaded_remote_json',
+      ),
+      prepareLocalProfileJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_profile_prepare_local_json',
+      ),
+      expandLinksNativeJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_profile_expand_links_native_json',
       );
 
   final _AbiVersionDart abiVersion;
@@ -1756,4 +2076,22 @@ class _Bindings {
   final _StrToStrDart ensureAdminBgServiceJson;
   final _StrToStrDart setSystemProxyEnabledJson;
   final _NoArgStrDart getSystemProxyStatusJson;
+  final _NoArgU64Dart createTask;
+  final _U64ToBoolDart cancelTask;
+  final _U64VoidDart removeTask;
+  final _U64ToStrDart taskProgressJson;
+  final _StrToStrDart downloadUpdateVerifiedJson;
+  final _StrToStrDart healthCheckJson;
+  final _Str2ToStrDart phoneImportServerStartJson;
+  final _U64ToStrDart phoneImportServerPollJson;
+  final _U64ToBoolDart phoneImportServerIsLocked;
+  final _U64ToBoolDart phoneImportServerHandled;
+  final _U64ToBoolDart phoneImportServerClose;
+  final _Str2ToStrDart lanFileServerStartJson;
+  final _U64ToStrDart lanFileServerPollJson;
+  final _U64ToBoolDart lanFileServerClose;
+  final _StrToStrDart fetchAndPrepareRemoteAttemptJson;
+  final _StrToStrDart finalizeDownloadedRemoteJson;
+  final _StrToStrDart prepareLocalProfileJson;
+  final _StrToStrDart expandLinksNativeJson;
 }

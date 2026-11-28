@@ -220,4 +220,61 @@ class HiddifyRustNative {
   }) => null;
 
   ({bool available, bool enabled})? getSystemProxyStatus() => null;
+
+  int? createTask() => null;
+  bool? cancelTask(int taskId) => null;
+  void removeTask(int taskId) {}
+  ({int receivedBytes, int totalBytes, bool cancelled, bool finished})? taskProgress(int taskId) => null;
+
+  ({String status, String path, int bytesWritten, String? error})? downloadUpdateVerified({
+    required String url,
+    required String destinationPath,
+    required int expectedSize,
+    required String expectedSha256,
+    String userAgent = '',
+    int proxyPort = 0,
+    String proxySecret = '',
+    int cancelTaskId = 0,
+    int timeoutMs = 30000,
+  }) => null;
+
+  Map<String, dynamic>? healthCheck({
+    String target = 'google.com',
+    String proxyAddr = '',
+    bool checkDns = false,
+    bool checkHttp = true,
+    bool checkQuic = false,
+    String dnsServer = '1.1.1.1:53',
+    int timeoutMs = 15000,
+  }) => null;
+
+  ({int handle, String url, String host, int port, String token})? phoneImportServerStart({
+    required String bindIp,
+    required Map<String, dynamic> pageText,
+  }) => null;
+  ({bool locked, List<({String text, String fromIp, int timestampMs})> entries})? phoneImportServerPoll(int handle) =>
+      null;
+  bool? phoneImportServerIsLocked(int handle) => null;
+  bool? phoneImportServerHandled(int handle) => null;
+  bool? phoneImportServerClose(int handle) => null;
+
+  ({int handle, String url, String host, int port, String token})? lanFileServerStart({
+    required String bindIp,
+    required String filePath,
+  }) => null;
+  List<String>? lanFileServerPoll(int handle) => null;
+  bool? lanFileServerClose(int handle) => null;
+
+  Map<String, dynamic>? fetchAndPrepareRemoteAttempt(Map<String, dynamic> request) => null;
+  Map<String, dynamic>? finalizeDownloadedRemote(Map<String, dynamic> request) => null;
+  Map<String, dynamic>? prepareLocalProfile(Map<String, dynamic> request) => null;
+  ({String status, String? text, String? error})? expandLinksNative({
+    required String text,
+    bool decodeBase64First = false,
+    String userAgent = '',
+    int proxyPort = 0,
+    String proxySecret = '',
+    int timeoutMs = 15000,
+    int cancelTaskId = 0,
+  }) => null;
 }

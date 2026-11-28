@@ -11,8 +11,13 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 pub mod admin_service;
+pub mod cancel;
 pub mod fetch_url;
+pub mod health_check;
+pub mod lan_server;
+pub mod proxy_dial;
 pub mod system_proxy;
+pub mod update_download;
 
 /// Fallback obscured IP string when input is neither dotted IPv4 nor colon-separated IPv6.
 pub const FALLBACK_OBSCURED_ADDRESS: &str = "*.*.*.*";

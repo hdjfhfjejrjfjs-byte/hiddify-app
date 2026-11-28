@@ -236,6 +236,29 @@ char *hiddify_net_ensure_admin_bg_service_json(const char *request_json);
 char *hiddify_net_set_system_proxy_enabled_json(const char *request_json);
 char *hiddify_net_get_system_proxy_status_json(void);
 
+/* Phase 5 (C-ABI v5): Task Cancellation, Streaming Update Download, LAN Servers, Health Probe & Subscription Pipeline */
+uint64_t hiddify_net_create_task(void);
+int32_t hiddify_net_cancel_task(uint64_t task_id);
+void hiddify_net_remove_task(uint64_t task_id);
+char *hiddify_net_task_progress_json(uint64_t task_id);
+char *hiddify_net_download_update_verified_json(const char *request_json);
+char *hiddify_net_health_check_json(const char *request_json);
+
+char *hiddify_net_phone_import_server_start_json(const char *bind_ip, const char *page_text_json);
+char *hiddify_net_phone_import_server_poll_json(uint64_t handle);
+int32_t hiddify_net_phone_import_server_is_locked(uint64_t handle);
+int32_t hiddify_net_phone_import_server_handled(uint64_t handle);
+int32_t hiddify_net_phone_import_server_close(uint64_t handle);
+
+char *hiddify_net_lan_file_server_start_json(const char *bind_ip, const char *file_path);
+char *hiddify_net_lan_file_server_poll_json(uint64_t handle);
+int32_t hiddify_net_lan_file_server_close(uint64_t handle);
+
+char *hiddify_profile_fetch_and_prepare_remote_attempt_json(const char *request_json);
+char *hiddify_profile_finalize_downloaded_remote_json(const char *request_json);
+char *hiddify_profile_prepare_local_json(const char *request_json);
+char *hiddify_profile_expand_links_native_json(const char *request_json);
+
 #ifdef __cplusplus
 }
 #endif

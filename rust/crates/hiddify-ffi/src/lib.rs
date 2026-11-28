@@ -19,7 +19,7 @@ use hiddify_profile::download::DownloadProblemKind;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-const ABI_VERSION: u32 = 4;
+const ABI_VERSION: u32 = 5;
 
 unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
@@ -1510,6 +1510,210 @@ pub extern "C" fn hiddify_net_get_system_proxy_status_json() -> *mut c_char {
     })
 }
 
+// ============================================================================
+// Phase 5 (C-ABI v5): Task Cancellation, Streaming Update Download, LAN Servers,
+// Health Probe, and Native Subscription Fetch/Expansion Pipeline
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_create_task() -> u64 {
+    catch_unwind(hiddify_net::cancel::create_task).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_cancel_task(task_id: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::cancel::cancel_task(task_id)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_remove_task(task_id: u64) {
+    let _ = catch_unwind(|| hiddify_net::cancel::remove_task(task_id));
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_task_progress_json(task_id: u64) -> *mut c_char {
+    ffi_string(|| {
+        let snap = hiddify_net::cancel::task_progress(task_id)?;
+        serde_json::to_string(&snap).ok()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_download_update_verified_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::update_download::{download_and_verify_update, UpdateDownloadRequest};
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: UpdateDownloadRequest = serde_json::from_str(req_str).ok()?;
+        let res = download_and_verify_update(&req);
+        serde_json::to_string(&res).ok()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_health_check_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::health_check::{run_health_checks, HealthCheckOptions};
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let opts: HealthCheckOptions = serde_json::from_str(req_str).ok()?;
+        let report = run_health_checks(&opts);
+        serde_json::to_string(&report).ok()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_phone_import_server_start_json(
+    bind_ip: *const c_char,
+    page_text_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::lan_server::{phone_import_server_start, PhoneImportPageText};
+    ffi_string(|| {
+        let ip = cstr_to_str(bind_ip)?;
+        let text_str = cstr_to_str(page_text_json)?;
+        let text: PhoneImportPageText = serde_json::from_str(text_str).ok()?;
+        match phone_import_server_start(ip, text) {
+            Ok(info) => Some(json!({ "ok": true, "info": info }).to_string()),
+            Err(err) => Some(json!({ "ok": false, "error": err }).to_string()),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_phone_import_server_poll_json(handle: u64) -> *mut c_char {
+    ffi_string(|| {
+        let snap = hiddify_net::lan_server::phone_import_server_poll(handle)?;
+        serde_json::to_string(&snap).ok()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_phone_import_server_is_locked(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::lan_server::phone_import_server_is_locked(handle)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_phone_import_server_handled(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::lan_server::phone_import_server_handled(handle)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_phone_import_server_close(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::lan_server::phone_import_server_close(handle)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_lan_file_server_start_json(
+    bind_ip: *const c_char,
+    file_path: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::lan_server::lan_file_server_start;
+    ffi_string(|| {
+        let ip = cstr_to_str(bind_ip)?;
+        let path = cstr_to_str(file_path)?;
+        match lan_file_server_start(ip, path) {
+            Ok(info) => Some(json!({ "ok": true, "info": info }).to_string()),
+            Err(err) => Some(json!({ "ok": false, "error": err }).to_string()),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_lan_file_server_poll_json(handle: u64) -> *mut c_char {
+    ffi_string(|| {
+        let list = hiddify_net::lan_server::lan_file_server_poll_downloads(handle)?;
+        serde_json::to_string(&list).ok()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_lan_file_server_close(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::lan_server::lan_file_server_close(handle)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_profile_fetch_and_prepare_remote_attempt_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_profile::pipeline::{
+        fetch_and_prepare_remote_attempt, RemoteProfileAttemptRequest,
+    };
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: RemoteProfileAttemptRequest = serde_json::from_str(req_str).ok()?;
+        let res = fetch_and_prepare_remote_attempt(&req);
+        serde_json::to_string(&res).ok()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_profile_finalize_downloaded_remote_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use hiddify_net::fetch_url::FetchHttpHeader;
+    use hiddify_profile::pipeline::{finalize_downloaded_remote_bytes, ProfileMetadataInput};
+
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: Value = serde_json::from_str(req_str).ok()?;
+        let body_b64 = req.get("bodyB64").and_then(Value::as_str).unwrap_or("");
+        let raw_bytes = BASE64_STANDARD.decode(body_b64.as_bytes()).ok()?;
+        let headers: Vec<FetchHttpHeader> = req
+            .get("headers")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let metadata: ProfileMetadataInput = req
+            .get("metadata")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let res = finalize_downloaded_remote_bytes(
+            &raw_bytes,
+            &headers,
+            req.get("tempFilePath").and_then(Value::as_str).unwrap_or(""),
+            req.get("userAgent").and_then(Value::as_str).unwrap_or(""),
+            req.get("proxyPort").and_then(Value::as_u64).unwrap_or(0) as u16,
+            req.get("proxySecret").and_then(Value::as_str).unwrap_or(""),
+            req.get("timeoutMs").and_then(Value::as_i64).unwrap_or(15_000) as i32,
+            req.get("cancelTaskId").and_then(Value::as_u64).unwrap_or(0),
+            &metadata,
+        );
+        serde_json::to_string(&res).ok()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_profile_prepare_local_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_profile::pipeline::{prepare_local_profile, LocalProfilePrepareRequest};
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: LocalProfilePrepareRequest = serde_json::from_str(req_str).ok()?;
+        let res = prepare_local_profile(&req);
+        serde_json::to_string(&res).ok()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_profile_expand_links_native_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_profile::pipeline::{expand_links_native, ExpandLinksRequest};
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: ExpandLinksRequest = serde_json::from_str(req_str).ok()?;
+        match expand_links_native(&req) {
+            Ok(text) => Some(json!({ "status": "ok", "text": text }).to_string()),
+            Err(msg) if msg == "cancelled" => Some(json!({ "status": "cancelled" }).to_string()),
+            Err(err) => Some(json!({ "status": "error", "error": err }).to_string()),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1517,7 +1721,7 @@ mod tests {
 
     #[test]
     fn ffi_roundtrip_and_memory_release() {
-        assert_eq!(hiddify_rust_abi_version(), 4);
+        assert_eq!(hiddify_rust_abi_version(), 5);
 
         let ip = CString::new("1.2.3.4").unwrap();
         let masked_ptr = unsafe { hiddify_net_obscure_ip(ip.as_ptr()) };
