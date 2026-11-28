@@ -6,10 +6,11 @@ set -euo pipefail
 # 使用方式：
 #   直接运行 ./build.sh（无需也不接受任何命令行参数），全程通过方向键 ↑/↓、空格与回车交互选择。
 # 功能：
-#   1. 交互式 TUI 向导：方向键选择构建平台、渠道、签名/巨魔模式、真机安装与增量/强制开关
-#   2. 自动检测与自愈环境（macOS、Xcode、Homebrew、Flutter SDK、CocoaPods、Rust 工具链及架构）
-#   3. 编译 macOS .app（可选 .dmg）和 iOS .ipa（自动识别签名、TrollStore 伪签或无签名打包）
-#   4. 幂等增量构建：依赖、代码生成、Pods、hiddify-core 与 Rust 原生模块均按内容哈希缓存跳过
+#   1. 启动自动检测远程更新（hiddify-app / hiddify-core / hiddify-sing-box），支持一键安全同步
+#   2. 交互式 TUI 向导：方向键选择构建平台、渠道、签名/巨魔模式、真机安装与增量/强制开关
+#   3. 自动检测与自愈环境（macOS、Xcode、Homebrew、Flutter SDK、CocoaPods、Rust 工具链及架构）
+#   4. 编译 macOS .app（可选 .dmg）和 iOS .ipa（自动识别签名、TrollStore 伪签或无签名打包）
+#   5. 幂等增量构建：依赖、代码生成、Pods、hiddify-core 与 Rust 原生模块均按内容哈希缓存跳过
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,11 +38,12 @@ PLUMESIGN_BIN="${PLUMESIGN:-}"
 BUILD_DMG=false
 SKIP_CODEGEN=false
 SKIP_RUST=false
-FORCE_LIBS=false
-FORCE_RUST=false
-FORCE_DEPS=false
+FORCE_LIBS=true
+FORCE_RUST=true
+FORCE_DEPS=true
 DO_CLEAN=false
 CHECK_ONLY=false
+SKIP_UPDATE_CHECK="${SKIP_UPDATE_CHECK:-0}"
 SENTRY_DSN="${SENTRY_DSN:-}"
 FLUTTER_BIN_DIR=""
 FLUTTER_VER=""
@@ -612,6 +614,333 @@ run_install_only_wizard() {
   done
 }
 
+# ==============================================================================
+# 源码远程更新自动检测与安全同步 (hiddify-app / hiddify-core / hiddify-sing-box)
+# ==============================================================================
+git_https_cmd() {
+  local repo_dir="$1"
+  shift
+  GIT_TERMINAL_PROMPT=0 git -C "$repo_dir" \
+    -c http.lowSpeedLimit=1 \
+    -c http.lowSpeedTime=8 \
+    -c url."https://github.com/".insteadOf="git@github.com:" \
+    -c url."https://github.com/".insteadOf="ssh://git@github.com/" \
+    "$@"
+}
+
+# 解析指定仓库当前应跟踪的远程分支名（优先上游分支，其次传入默认分支，最后探测远程 HEAD）
+resolve_repo_remote_branch() {
+  local repo_dir="$1"
+  local fallback_branch="${2:-}"
+  local upstream=""
+
+  upstream="$(git -C "$repo_dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ "$upstream" == origin/* ]]; then
+    printf '%s' "${upstream#origin/}"
+    return 0
+  fi
+
+  local cur_branch=""
+  cur_branch="$(git -C "$repo_dir" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [[ -n "$cur_branch" ]]; then
+    if git_https_cmd "$repo_dir" ls-remote --exit-code --heads origin "refs/heads/$cur_branch" >/dev/null 2>&1; then
+      printf '%s' "$cur_branch"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$fallback_branch" ]]; then
+    printf '%s' "$fallback_branch"
+    return 0
+  fi
+
+  local symref=""
+  symref="$(git_https_cmd "$repo_dir" ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {print $2; exit}' || true)"
+  if [[ "$symref" == refs/heads/* ]]; then
+    printf '%s' "${symref#refs/heads/}"
+    return 0
+  fi
+
+  printf 'main'
+}
+
+# 检查仓库工作区自身是否有未提交改动（忽略子模块指针变动）
+repo_has_local_edits() {
+  local repo_dir="$1"
+  local dirty=""
+  dirty="$(git -C "$repo_dir" status --porcelain --ignore-submodules=all 2>/dev/null || true)"
+  [[ -n "$dirty" ]]
+}
+
+# 轻量探测单个仓库是否有远程更新。
+# 输出格式: status|local_short|remote_short|branch|dirty|subject
+# status: up_to_date | outdated | offline | missing
+probe_repo_update() {
+  local repo_dir="$1"
+  local fallback_branch="${2:-}"
+
+  if [[ ! -e "$repo_dir/.git" ]]; then
+    printf 'missing|||||'
+    return 0
+  fi
+
+  local local_sha local_short branch remote_sha remote_short dirty="0" subject=""
+  local_sha="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z "$local_sha" ]]; then
+    printf 'missing|||||'
+    return 0
+  fi
+  local_short="${local_sha:0:7}"
+
+  branch="$(resolve_repo_remote_branch "$repo_dir" "$fallback_branch")"
+  remote_sha="$(git_https_cmd "$repo_dir" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
+  if [[ -z "$remote_sha" ]]; then
+    printf 'offline|%s||%s|0|' "$local_short" "$branch"
+    return 0
+  fi
+  remote_short="${remote_sha:0:7}"
+
+  if repo_has_local_edits "$repo_dir"; then
+    dirty="1"
+  fi
+
+  if [[ "$local_sha" == "$remote_sha" ]]; then
+    printf 'up_to_date|%s|%s|%s|%s|' "$local_short" "$remote_short" "$branch" "$dirty"
+    return 0
+  fi
+
+  # 仅在 SHA 变化时轻量 fetch 该分支，获取准确提交摘要
+  git_https_cmd "$repo_dir" fetch --no-tags --no-recurse-submodules origin "$branch" >/dev/null 2>&1 || true
+  subject="$(git -C "$repo_dir" log -1 --format='%s' "$remote_sha" 2>/dev/null | tr '|' '/' || true)"
+  printf 'outdated|%s|%s|%s|%s|%s' "$local_short" "$remote_short" "$branch" "$dirty" "$subject"
+}
+
+sync_main_app_repo() {
+  local branch="$1"
+  if repo_has_local_edits "$ROOT_DIR"; then
+    log_warn "hiddify-app 本地有未提交改动，已跳过自动拉取以避免覆盖你的修改"
+    return 1
+  fi
+  local before_script_hash after_script_hash
+  before_script_hash="$(shasum -a 256 "$SCRIPT_DIR/build.sh" 2>/dev/null | awk '{print $1}' || true)"
+
+  log_info "正在同步 hiddify-app (origin/$branch)..."
+  if git_https_cmd "$ROOT_DIR" fetch --no-tags origin "$branch" \
+    && git -C "$ROOT_DIR" merge --ff-only "origin/$branch"; then
+    local new_head
+    new_head="$(git -C "$ROOT_DIR" rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
+    log_ok "hiddify-app 已更新至 $new_head"
+    after_script_hash="$(shasum -a 256 "$SCRIPT_DIR/build.sh" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -n "$before_script_hash" && "$before_script_hash" != "$after_script_hash" ]]; then
+      log_info "检测到 build.sh 本身已更新，正在自动重新加载新版构建脚本..."
+      tui_cleanup
+      exec "$SCRIPT_DIR/build.sh"
+    fi
+    return 0
+  else
+    log_warn "hiddify-app 无法快进合并 (本地与远程存在分叉)，已保留当前本地代码"
+    return 1
+  fi
+}
+
+sync_submodule_repo() {
+  local name="$1"
+  local repo_dir="$2"
+  local branch="$3"
+  local update_nested="${4:-true}"
+
+  if repo_has_local_edits "$repo_dir"; then
+    log_warn "$name 本地有未提交改动，已跳过自动拉取以避免覆盖你的修改"
+    return 1
+  fi
+
+  log_info "正在同步 $name (origin/$branch)..."
+  if ! git_https_cmd "$repo_dir" fetch --no-tags --no-recurse-submodules origin "$branch"; then
+    log_warn "$name 远程拉取失败，继续使用当前本地版本"
+    return 1
+  fi
+
+  local cur_branch=""
+  cur_branch="$(git -C "$repo_dir" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [[ -n "$cur_branch" ]]; then
+    git -C "$repo_dir" branch -u "origin/$branch" "$cur_branch" >/dev/null 2>&1 || true
+    if ! git -C "$repo_dir" reset --hard "origin/$branch" >/dev/null 2>&1; then
+      log_warn "$name 更新分支 $cur_branch 失败，继续使用当前本地版本"
+      return 1
+    fi
+  else
+    if ! git -C "$repo_dir" checkout -f "origin/$branch" >/dev/null 2>&1; then
+      log_warn "$name 检出 origin/$branch 失败，继续使用当前本地版本"
+      return 1
+    fi
+  fi
+
+  if [[ "$update_nested" == true ]]; then
+    git -C "$repo_dir" submodule sync --recursive >/dev/null 2>&1 || true
+    git_https_cmd "$repo_dir" submodule update --init --recursive >/dev/null 2>&1 \
+      || log_warn "$name 嵌套子模块同步部分失败，可稍后重试"
+  fi
+
+  local new_head
+  new_head="$(git -C "$repo_dir" rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
+  log_ok "$name 已更新至 $new_head (origin/$branch)"
+  return 0
+}
+
+sync_singbox_if_outdated() {
+  local singbox_dir="$1"
+  local fallback_br=""
+  if [[ -f "$HIDDIFY_CORE_DIR/.gitmodules" ]]; then
+    fallback_br="$(git config -f "$HIDDIFY_CORE_DIR/.gitmodules" submodule.hiddify-sing-box.branch 2>/dev/null || true)"
+  fi
+  local sb_reprobe sb_st2 sb_l2 sb_r2 sb_br2 sb_d2 sb_m2
+  sb_reprobe="$(probe_repo_update "$singbox_dir" "$fallback_br")"
+  IFS='|' read -r sb_st2 sb_l2 sb_r2 sb_br2 sb_d2 sb_m2 <<< "$sb_reprobe"
+  if [[ "$sb_st2" == "outdated" ]]; then
+    sync_submodule_repo "hiddify-sing-box" "$singbox_dir" "$sb_br2" true || true
+  fi
+}
+
+check_remote_updates_interactive() {
+  if [[ "$SKIP_UPDATE_CHECK" == "1" || "$SKIP_UPDATE_CHECK" == "true" ]]; then
+    return 0
+  fi
+
+  printf "${C_DIM}  正在检测远程源码更新 (hiddify-app / hiddify-core / hiddify-sing-box)...${C_RESET}" >> "$TUI_OUT"
+
+  local core_branch singbox_dir singbox_fallback
+  core_branch="$(git config -f "$ROOT_DIR/.gitmodules" submodule.hiddify-core.branch 2>/dev/null || echo 'main')"
+  singbox_dir="$HIDDIFY_CORE_DIR/hiddify-sing-box"
+  singbox_fallback=""
+  if [[ -f "$HIDDIFY_CORE_DIR/.gitmodules" ]]; then
+    singbox_fallback="$(git config -f "$HIDDIFY_CORE_DIR/.gitmodules" submodule.hiddify-sing-box.branch 2>/dev/null || true)"
+  fi
+
+  local app_probe core_probe singbox_probe
+  app_probe="$(probe_repo_update "$ROOT_DIR" "main")"
+  core_probe="$(probe_repo_update "$HIDDIFY_CORE_DIR" "$core_branch")"
+  singbox_probe="$(probe_repo_update "$singbox_dir" "$singbox_fallback")"
+
+  # 清除检测提示行
+  printf "\r\033[2K" >> "$TUI_OUT"
+
+  local app_st app_l app_r app_br app_dirty app_msg
+  local core_st core_l core_r core_br core_dirty core_msg
+  local sb_st sb_l sb_r sb_br sb_dirty sb_msg
+
+  IFS='|' read -r app_st app_l app_r app_br app_dirty app_msg <<< "$app_probe"
+  IFS='|' read -r core_st core_l core_r core_br core_dirty core_msg <<< "$core_probe"
+  IFS='|' read -r sb_st sb_l sb_r sb_br sb_dirty sb_msg <<< "$singbox_probe"
+
+  local outdated_count=0
+  local core_outdated=false
+  local app_outdated=false
+  local sb_outdated=false
+
+  if [[ "$app_st" == "outdated" ]]; then
+    outdated_count=$((outdated_count + 1))
+    app_outdated=true
+  fi
+  if [[ "$core_st" == "outdated" ]]; then
+    outdated_count=$((outdated_count + 1))
+    core_outdated=true
+  fi
+  if [[ "$sb_st" == "outdated" ]]; then
+    outdated_count=$((outdated_count + 1))
+    sb_outdated=true
+  fi
+
+  if [[ $outdated_count -eq 0 ]]; then
+    if [[ "$app_st" == "offline" && "$core_st" == "offline" ]]; then
+      printf "  ${C_YELLOW}[WARN]${C_RESET} 远程更新检测跳过（网络不可用或超时），将使用当前本地源码\n\n" >> "$TUI_OUT"
+    else
+      printf "  ${C_GREEN}[OK]${C_RESET}   源码均为最新 (app=%s | core=%s | sing-box=%s)\n\n" \
+        "${app_l:-n/a}" "${core_l:-n/a}" "${sb_l:-n/a}" >> "$TUI_OUT"
+    fi
+    return 0
+  fi
+
+  printf "  ${C_YELLOW}┌─ 检测到远程源码有更新 ───────────────────────────────────${C_RESET}\n" >> "$TUI_OUT"
+  if [[ "$app_outdated" == true ]]; then
+    local app_warn=""
+    [[ "$app_dirty" == "1" ]] && app_warn=" ${C_YELLOW}[本地有未提交改动]${C_RESET}"
+    printf "  ${C_YELLOW}│${C_RESET} ${C_BOLD}hiddify-app${C_RESET} (%s): %s → ${C_GREEN}%s${C_RESET}%b\n" "$app_br" "$app_l" "$app_r" "$app_warn" >> "$TUI_OUT"
+    [[ -n "$app_msg" ]] && printf "  ${C_YELLOW}│${C_RESET}   ${C_DIM}%s${C_RESET}\n" "$app_msg" >> "$TUI_OUT"
+  fi
+  if [[ "$core_outdated" == true ]]; then
+    local core_warn=""
+    [[ "$core_dirty" == "1" ]] && core_warn=" ${C_YELLOW}[本地有未提交改动]${C_RESET}"
+    printf "  ${C_YELLOW}│${C_RESET} ${C_BOLD}hiddify-core${C_RESET} (%s): %s → ${C_GREEN}%s${C_RESET}%b\n" "$core_br" "$core_l" "$core_r" "$core_warn" >> "$TUI_OUT"
+    [[ -n "$core_msg" ]] && printf "  ${C_YELLOW}│${C_RESET}   ${C_DIM}%s${C_RESET}\n" "$core_msg" >> "$TUI_OUT"
+  fi
+  if [[ "$sb_outdated" == true ]]; then
+    local sb_warn=""
+    [[ "$sb_dirty" == "1" ]] && sb_warn=" ${C_YELLOW}[本地有未提交改动]${C_RESET}"
+    printf "  ${C_YELLOW}│${C_RESET} ${C_BOLD}hiddify-sing-box${C_RESET} (%s): %s → ${C_GREEN}%s${C_RESET}%b\n" "$sb_br" "$sb_l" "$sb_r" "$sb_warn" >> "$TUI_OUT"
+    [[ -n "$sb_msg" ]] && printf "  ${C_YELLOW}│${C_RESET}   ${C_DIM}%s${C_RESET}\n" "$sb_msg" >> "$TUI_OUT"
+  fi
+  printf "  ${C_YELLOW}└──────────────────────────────────────────────────────────${C_RESET}\n\n" >> "$TUI_OUT"
+
+  local update_choices=()
+  if [[ "$app_outdated" == true && ( "$core_outdated" == true || "$sb_outdated" == true ) ]]; then
+    update_choices=(
+      "同步全部远程更新并继续构建（推荐 · 本地未提交改动受保护）"
+      "仅同步核心子模块 (hiddify-core / hiddify-sing-box)，保留主仓库不动"
+      "暂不更新，直接使用当前本地源码构建"
+    )
+  else
+    update_choices=(
+      "立即拉取上述最新源码并继续构建（推荐 · 自动触发增量重编）"
+      "暂不更新，直接使用当前本地源码构建"
+    )
+  fi
+
+  tui_select "发现远程更新，是否同步到最新源码？" 0 false "${update_choices[@]}"
+  local pick=$TUI_RESULT
+
+  if [[ "$app_outdated" == true && ( "$core_outdated" == true || "$sb_outdated" == true ) ]]; then
+    case $pick in
+      0)
+        sync_main_app_repo "$app_br" || true
+        if [[ "$core_outdated" == true ]]; then
+          sync_submodule_repo "hiddify-core" "$HIDDIFY_CORE_DIR" "$core_br" true || true
+        fi
+        if [[ "$sb_outdated" == true || "$core_outdated" == true ]]; then
+          sync_singbox_if_outdated "$singbox_dir"
+        fi
+        printf "\n" >> "$TUI_OUT"
+        ;;
+      1)
+        if [[ "$core_outdated" == true ]]; then
+          sync_submodule_repo "hiddify-core" "$HIDDIFY_CORE_DIR" "$core_br" true || true
+        fi
+        if [[ "$sb_outdated" == true || "$core_outdated" == true ]]; then
+          sync_singbox_if_outdated "$singbox_dir"
+        fi
+        printf "\n" >> "$TUI_OUT"
+        ;;
+      *)
+        printf "  ${C_DIM}已跳过远程更新，继续使用当前本地源码。${C_RESET}\n\n" >> "$TUI_OUT"
+        ;;
+    esac
+  else
+    if [[ $pick -eq 0 ]]; then
+      if [[ "$app_outdated" == true ]]; then
+        sync_main_app_repo "$app_br" || true
+      fi
+      if [[ "$core_outdated" == true ]]; then
+        sync_submodule_repo "hiddify-core" "$HIDDIFY_CORE_DIR" "$core_br" true || true
+      fi
+      if [[ "$sb_outdated" == true || "$core_outdated" == true ]]; then
+        sync_singbox_if_outdated "$singbox_dir"
+      fi
+      printf "\n" >> "$TUI_OUT"
+    else
+      printf "  ${C_DIM}已跳过远程更新，继续使用当前本地源码。${C_RESET}\n\n" >> "$TUI_OUT"
+    fi
+  fi
+}
+
 run_interactive_wizard() {
   if [[ ! -r "$TUI_IN" || ! -w "$TUI_OUT" ]]; then
     die "当前非交互式终端环境，请在终端中直接运行 ./build.sh 并使用方向键选择"
@@ -627,6 +956,8 @@ run_interactive_wizard() {
   printf "${C_CYAN}║${C_RESET}  ${C_BOLD}Hiddify 一键构建控制台 (Flutter + Go Core + Rust FFI)${C_RESET}   ${C_CYAN}║${C_RESET}\n" >> "$TUI_OUT"
   printf "${C_CYAN}║${C_RESET}  ${C_DIM}版本: %-18s Commit: %-21s${C_RESET} ${C_CYAN}║${C_RESET}\n" "$ver_preview" "$commit_preview" >> "$TUI_OUT"
   printf "${C_CYAN}╚══════════════════════════════════════════════════════════╝${C_RESET}\n\n" >> "$TUI_OUT"
+
+  check_remote_updates_interactive
 
   local step=1
   local sel_task=0
@@ -647,10 +978,11 @@ run_interactive_wizard() {
         BUILD_DMG=false
         SKIP_CODEGEN=false
         SKIP_RUST=false
-        FORCE_LIBS=false
-        FORCE_RUST=false
-        FORCE_DEPS=false
+        FORCE_LIBS=true
+        FORCE_RUST=true
+        FORCE_DEPS=true
         DO_CLEAN=false
+        multi_state=""
         BUILT_IOS_IPA=""
         BUILT_ARTIFACTS=()
 
@@ -883,7 +1215,15 @@ run_interactive_wizard() {
           "自定义高级设置 (输出目录 / 重签 Bundle ID / 名称 / 描述文件)"
         )
 
-        if tui_multiselect "构建附加开关 (空格勾选，直接回车保持默认增量构建)" "$multi_state" "${multi_opts[@]}"; then
+        if [[ -z "$multi_state" ]]; then
+          if [[ "$has_dmg_opt" == true ]]; then
+            multi_state="0 1 1 1 0 0 0 0"
+          else
+            multi_state="1 1 1 0 0 0 0"
+          fi
+        fi
+
+        if tui_multiselect "构建附加开关 (空格勾选/取消，默认已勾选强制重编 Rust / Core / 刷新依赖)" "$multi_state" "${multi_opts[@]}"; then
           multi_state="${TUI_MULTI_SELECTED[*]}"
           local offset=0
           if [[ "$has_dmg_opt" == true ]]; then
@@ -1674,8 +2014,9 @@ prepare_flutter_project() {
 
 hiddify_core_input_hash() {
   [[ -d "$HIDDIFY_CORE_DIR" ]] || die "未找到本地 hiddify-core 源码目录: $HIDDIFY_CORE_DIR"
-  local head_rev status_hash diff_hash
+  local head_rev sub_hash status_hash diff_hash
   head_rev="$(git -C "$HIDDIFY_CORE_DIR" rev-parse HEAD 2>/dev/null || echo nogit)"
+  sub_hash="$(git -C "$HIDDIFY_CORE_DIR" submodule status --recursive 2>/dev/null | shasum -a 256 | awk '{print $1}')"
   status_hash="$(git -C "$HIDDIFY_CORE_DIR" status --porcelain --untracked-files=all 2>/dev/null | shasum -a 256 | awk '{print $1}')"
   diff_hash="$(
     {
@@ -1685,7 +2026,7 @@ hiddify_core_input_hash() {
       done
     } | shasum -a 256 | awk '{print $1}'
   )"
-  printf 'dir=%s;head=%s;st=%s;diff=%s' "$HIDDIFY_CORE_DIR" "$head_rev" "$status_hash" "$diff_hash"
+  printf 'dir=%s;head=%s;sub=%s;st=%s;diff=%s' "$HIDDIFY_CORE_DIR" "$head_rev" "$sub_hash" "$status_hash" "$diff_hash"
 }
 
 macos_core_dylib_ready() {
