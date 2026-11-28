@@ -1,13 +1,11 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:hiddify/core/rust/hiddify_rust.dart';
-import 'package:hiddify/hiddifycore/core_interface/windows_crash.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcore/hcore.pb.dart';
 import 'package:hiddify/utils/custom_loggers.dart';
-import 'package:path/path.dart' as p;
 
 final _logger = infraLogger('CoreProcess');
 
@@ -21,69 +19,43 @@ class CoreProcessException implements Exception {
   String toString() => message;
 }
 
-/// The desktop core in a process of its own, instead of the library loaded into the UI process.
-///
-/// It runs `<launcher> core …` (hiddify-core cmd/cmd_core.go):
-/// - Windows: `HiddifyCoreEngine.exe`, shown as Hiddify Core Engine with the core icon
-/// - macOS: `Contents/Helpers/Hiddify Core.app`, named Hiddify with the core icon; not an app to
-///   macOS, so App Nap does not throttle it while the UI is in the background (hiddify-app#2343)
-/// - Linux: `HiddifyCli`, which renames itself `hiddify-core` for htop and top
-///
-/// The core raises its own priority. It stops, restoring the system proxy, when its stdin closes:
-/// this process holds the other end and never writes to it, so it closes when the UI exits, even
-/// when the UI crashes or is killed. The core also watches the UI's process id.
+/// The desktop core in a process of its own, supervised natively by `hiddify-net::core_process`
+/// via `libhiddify_rust` (C-ABI v7).
 class CoreProcess {
-  CoreProcess._(this._process, this.serverCertificatePem, this._crashFile, this._stderrTail, this._startedAt);
+  CoreProcess._(this._handle, this.processId, this.serverCertificatePem);
 
-  static const _secretEnv = 'HIDDIFY_CORE_SECRET';
-  // The setup loads the core's data and can take a while on a slow disk.
   static const _readyTimeout = Duration(seconds: 60);
-  // The core stops within 8 s; a little more for the process to exit.
-  static const _stopTimeout = Duration(seconds: 10);
 
-  final Process _process;
+  final int _handle;
 
-  /// Where the core writes a Go crash (hcore.Setup: `<working dir>/data/stderr<mode name>.log`). Once it
-  /// is set up its stderr goes to /dev/null or NUL, so this file is the only place a panic shows.
-  final File _crashFile;
-
-  /// When the process was started: a crash file older than that is an earlier run's.
-  final DateTime _startedAt;
-
-  /// The last lines of stderr, written before the core was set up.
-  final List<String> _stderrTail;
+  /// Operating system PID of the core child process.
+  final int processId;
 
   /// The gRPC server certificate (PEM), empty without TLS.
   final String serverCertificatePem;
 
   bool _stopping = false;
+  Future<int>? _exitFuture;
 
-  int get processId => _process.pid;
+  /// Completes with the exit code when the core process exits. [stop] completes it as well.
+  Future<int> get exitCode => _exitFuture ??= _waitExit();
 
-  /// Completes with the exit code. [stop] completes it as well.
-  Future<int> get exitCode => _process.exitCode;
+  Future<int> _waitExit() {
+    final handle = _handle;
+    return Isolate.run(() => hiddifyRust.coreProcessWaitExit(handle) ?? -1);
+  }
 
   /// Whether the exit was asked for by [stop].
-  bool get stopping => _stopping;
+  bool get stopping => _stopping || (hiddifyRust.coreProcessIsStopping(_handle) ?? false);
 
   /// The launcher of this build, or null when it has none (tests, or a core built before it).
   static String? executablePath() {
     if (Platform.environment.containsKey('FLUTTER_TEST')) return null;
-    final directory = p.dirname(Platform.resolvedExecutable);
-    final String path;
-    if (Platform.isWindows) {
-      path = p.join(directory, 'HiddifyCoreEngine.exe');
-    } else if (Platform.isMacOS) {
-      path = p.normalize(p.join(directory, '..', 'Helpers', 'Hiddify Core.app', 'Contents', 'MacOS', 'Hiddify'));
-    } else if (Platform.isLinux) {
-      path = p.join(directory, 'HiddifyCli');
-    } else {
-      return null;
-    }
-    return File(path).existsSync() ? path : null;
+    hiddifyRust.ensureAvailable('coreProcessExecutablePath');
+    return hiddifyRust.coreProcessExecutablePath(Platform.resolvedExecutable);
   }
 
-  /// Starts the core and waits until its gRPC server listens.
+  /// Starts the core and waits until its gRPC server listens (`HIDDIFY_CORE_READY`).
   static Future<CoreProcess> start({
     required String executable,
     required String baseDir,
@@ -94,135 +66,69 @@ class CoreProcess {
     required String secret,
     required bool debug,
   }) async {
-    final startedAt = DateTime.now();
-    final process = await Process.start(
-      executable,
-      [
-        'core',
-        '--base-dir',
-        baseDir,
-        '--working-dir',
-        workingDir,
-        '--temp-dir',
-        tempDir,
-        '--listen',
-        listen,
-        '--mode',
-        '$mode',
-        '--owner-pid',
-        '$pid',
-        if (debug) '--debug',
-      ],
-      // the secret stays out of the process list
-      environment: {_secretEnv: secret},
-      // Linux's HiddifyCli links its library as ./lib/hiddify-core.so, relative to the working
-      // directory; the core changes it to its own folder once set up.
-      workingDirectory: p.dirname(executable),
-    );
-    _logger.info('core process ${process.pid} started: $executable');
-
-    // named by the mode's name, as Go prints the enum
-    final crashFile = File(p.join(workingDir, 'data', 'stderr${SetupMode.valueOf(mode)?.name ?? mode}.log'));
-    final stderrTail = <String>[];
-    final ready = Completer<String>();
-    // Both pipes are read to the end: a full pipe would block the core.
-    process.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
-      final event = hiddifyRust.require(hiddifyRust.parseCoreStdoutLine(line), 'parseCoreStdoutLine');
-      switch (event.kind) {
-        case 'ready' when !ready.isCompleted:
-          ready.complete(event.certificatePem ?? '');
-        case 'error' when !ready.isCompleted:
-          ready.completeError(CoreProcessException(event.message ?? 'core error'));
-        case 'log':
-          _logger.debug('core: ${event.line}');
-      }
-    }, onError: (Object _) {});
-    final stderrDone = Completer<void>();
-    process.stderr
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .listen(
-          (line) {
-            if (line.isEmpty) return;
-            _logger.debug('core: $line');
-            stderrTail.add(line);
-            if (stderrTail.length > _stderrTailLines) stderrTail.removeAt(0);
-          },
-          onError: (Object _) {},
-          onDone: stderrDone.complete,
-        );
-    unawaited(
-      process.exitCode.then((code) async {
-        if (ready.isCompleted) return;
-        // the rest of stderr, which holds a crash, arrives after the exit
-        await stderrDone.future.timeout(const Duration(seconds: 1), onTimeout: () {});
-        final reason = await crashReasonOf(crashFile, stderrTail, startedAt);
-        if (ready.isCompleted) return;
-        ready.completeError(
-          CoreProcessException('the core exited ($code) before it was ready${reason == null ? '' : ': $reason'}'),
-        );
-      }),
+    hiddifyRust.ensureAvailable('coreProcessStart');
+    final modeName = SetupMode.valueOf(mode)?.name ?? '$mode';
+    final currentPid = pid;
+    final outcome = await Isolate.run(
+      () => hiddifyRust.require(
+        hiddifyRust.coreProcessStart(
+          executable: executable,
+          baseDir: baseDir,
+          workingDir: workingDir,
+          tempDir: tempDir,
+          listen: listen,
+          mode: mode,
+          modeName: modeName,
+          secret: secret,
+          debug: debug,
+          ownerPid: currentPid,
+        ),
+        'coreProcessStart',
+      ),
     );
 
-    try {
-      final certificatePem = await ready.future.timeout(_readyTimeout);
-      return CoreProcess._(
-        process,
-        certificatePem,
-        crashFile,
-        stderrTail,
-        startedAt,
-      );
-    } catch (_) {
-      process.kill();
-      rethrow;
+    switch (outcome.status) {
+      case 'ok':
+        _logger.info('core process ${outcome.pid} started: $executable');
+        return CoreProcess._(outcome.handle, outcome.pid, outcome.certificatePem);
+      case 'timeout':
+        throw TimeoutException(outcome.message ?? 'waiting for core process ready', _readyTimeout);
+      case 'spawn_error':
+        throw ProcessException(executable, const ['core'], outcome.message ?? 'failed to spawn core process');
+      default:
+        throw CoreProcessException(outcome.message ?? 'core error');
     }
   }
 
-  static const _stderrTailLines = 50;
-
-  /// Why the core crashed, from its Go crash output: the `panic:`, `fatal error:` or Windows
-  /// `Exception` line. Without one, on Windows, what Windows recorded (see [WindowsCrash]); else
-  /// null. Read it right after the exit: a restarted core moves the file into its crash reports.
+  /// Why the core crashed, from its Go crash output or Windows Event 1000 / NTSTATUS exit code.
   Future<String?> crashReason() async {
-    final fromOutput = await crashReasonOf(_crashFile, _stderrTail, _startedAt);
-    if (fromOutput != null || !Platform.isWindows) return fromOutput;
-    return WindowsCrash.reason(processId, await exitCode);
+    hiddifyRust.ensureAvailable('coreProcessCrashReason');
+    final handle = _handle;
+    final reason = await Isolate.run(() => hiddifyRust.coreProcessCrashReason(handle));
+    hiddifyRust.coreProcessForget(handle);
+    return reason;
   }
 
-  /// The file is this run's only when it was written after [startedAt]: a core that dies before its
-  /// setup re-creates it showed the panic of an earlier crash as its own.
   @visibleForTesting
   static Future<String?> crashReasonOf(File crashFile, List<String> stderrTail, DateTime startedAt) async {
     hiddifyRust.ensureAvailable('coreCrashReasonOf');
     return hiddifyRust.coreCrashReasonOf(crashFile.path, stderrTail, startedAt.millisecondsSinceEpoch);
   }
 
-  /// The line of a Go crash output that says what went wrong, shortened, or null when [output]
-  /// holds no crash.
   static String? crashHeadline(String output) {
     hiddifyRust.ensureAvailable('coreCrashHeadline');
     return hiddifyRust.coreCrashHeadline(output);
   }
 
-  /// Stops the core gracefully, so it can restore the system proxy, and kills it if it does not exit.
+  /// Stops the core gracefully (closing `stdin`), escalating to `SIGKILL` after 10s if needed.
   Future<void> stop() async {
     if (_stopping) {
       await exitCode;
       return;
     }
     _stopping = true;
-    try {
-      await _process.stdin.close();
-    } catch (_) {
-      // already gone
-    }
-    try {
-      await exitCode.timeout(_stopTimeout);
-    } on TimeoutException {
-      _logger.warning('core process $processId did not stop in time, killing it');
-      _process.kill(ProcessSignal.sigkill);
-      await exitCode;
-    }
+    final handle = _handle;
+    await Isolate.run(() => hiddifyRust.coreProcessStop(handle));
+    await exitCode;
   }
 }

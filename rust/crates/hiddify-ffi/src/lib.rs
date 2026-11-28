@@ -19,7 +19,7 @@ use hiddify_profile::download::DownloadProblemKind;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-const ABI_VERSION: u32 = 6;
+const ABI_VERSION: u32 = 7;
 
 unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
@@ -1773,6 +1773,129 @@ pub unsafe extern "C" fn hiddify_net_speedtest_json(request_json: *const c_char)
     })
 }
 
+// ============================================================================
+// Phase 7 (C-ABI v7): Ezytel Service, Desktop CoreProcess Supervisor & Crypto Tools
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_ezytel_invoke_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        match hiddify_net::ezytel::invoke_ezytel_json(req_str) {
+            Ok(data_json) => Some(json!({ "ok": true, "dataJson": data_json }).to_string()),
+            Err(err) => Some(json!({ "ok": false, "error": err }).to_string()),
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_core_process_executable_path(
+    resolved_exe: *const c_char,
+) -> *mut c_char {
+    ffi_string(|| {
+        let exe = cstr_to_str(resolved_exe)?;
+        hiddify_net::core_process::resolve_core_executable_path(exe)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_net_core_process_start_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    use hiddify_net::core_process::{core_process_start, CoreProcessStartRequest};
+    ffi_string(|| {
+        let req_str = cstr_to_str(request_json)?;
+        let req: CoreProcessStartRequest = serde_json::from_str(req_str).ok()?;
+        let out = core_process_start(&req);
+        serde_json::to_string(&out).ok()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_core_process_wait_exit(handle: u64) -> i32 {
+    catch_unwind(|| {
+        hiddify_net::core_process::core_process_wait_exit(handle).unwrap_or(i32::MIN)
+    })
+    .unwrap_or(i32::MIN)
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_core_process_is_stopping(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::core_process::core_process_is_stopping(handle)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_core_process_crash_reason(handle: u64) -> *mut c_char {
+    ffi_string(|| hiddify_net::core_process::core_process_crash_reason(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_core_process_stop(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::core_process::core_process_stop(handle)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_core_process_forget(handle: u64) -> i32 {
+    ffi_bool(|| Some(hiddify_net::core_process::core_process_forget(handle)))
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_net_windows_crash_reason(pid: i64, exit_code: i64) -> *mut c_char {
+    ffi_string(|| hiddify_net::core_process::windows_crash_reason(pid, exit_code))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_crypto_encrypt_henc_config_json(
+    key_b64: *const c_char,
+    config_str: *const c_char,
+) -> *mut c_char {
+    ffi_string(|| {
+        let k = cstr_to_str(key_b64)?;
+        let c = cstr_to_str(config_str)?;
+        match hiddify_crypto::encrypt_henc_config(k, c) {
+            Ok(encrypted) => Some(json!({ "ok": true, "encrypted": encrypted }).to_string()),
+            Err(err) => Some(json!({ "ok": false, "error": err }).to_string()),
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_crypto_try_decrypt_henc_config(
+    key_b64: *const c_char,
+    value_str: *const c_char,
+) -> *mut c_char {
+    ffi_string(|| {
+        let k = cstr_to_str(key_b64)?;
+        let v = cstr_to_str(value_str)?;
+        let bytes = hiddify_crypto::try_decrypt_henc_config(k, v)?;
+        String::from_utf8(bytes).ok()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hiddify_crypto_generate_loopback_cert_pair_json() -> *mut c_char {
+    ffi_string(|| {
+        let pair = hiddify_crypto::generate_loopback_certificate_pair().ok()?;
+        Some(
+            json!({
+                "certificatePem": pair.certificate_pem,
+                "privateKeyPem": pair.private_key_pem,
+            })
+            .to_string(),
+        )
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hiddify_crypto_cert_has_loopback_san(cert_pem: *const c_char) -> i32 {
+    ffi_bool(|| {
+        let pem = cstr_to_str(cert_pem)?;
+        Some(hiddify_crypto::certificate_has_loopback_san(pem))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,7 +1903,7 @@ mod tests {
 
     #[test]
     fn ffi_roundtrip_and_memory_release() {
-        assert_eq!(hiddify_rust_abi_version(), 6);
+        assert_eq!(hiddify_rust_abi_version(), 7);
 
         let ip = CString::new("1.2.3.4").unwrap();
         let masked_ptr = unsafe { hiddify_net_obscure_ip(ip.as_ptr()) };

@@ -868,12 +868,73 @@ fn exchange_h2<S: Read + Write>(
     finalize_body_and_headers(status_code, headers, data_buf, is_gzip)
 }
 
-fn encode_hpack_literal(out: &mut Vec<u8>, name: &str, value: &str) {
+pub(crate) fn encode_hpack_literal(out: &mut Vec<u8>, name: &str, value: &str) {
     out.push(0x00); // Literal Header Field without Indexing — New Name
     encode_hpack_int(out, 0, 7, name.len());
     out.extend_from_slice(name.as_bytes());
     encode_hpack_int(out, 0, 7, value.len());
     out.extend_from_slice(value.as_bytes());
+}
+
+/// Stateful HPACK header-block decoder preserving pseudo-headers (`:method`, `:path`, etc.)
+/// across HTTP/2 streams on a connection (used by the h2c gRPC server in `ezytel.rs`).
+pub(crate) fn decode_hpack_headers_stateful(
+    buf: &[u8],
+    dynamic_table: &mut Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut pos = 0usize;
+    let mut out = Vec::new();
+    let map_err = |e: StageError| match e {
+        StageError::Protocol(m) => m,
+        other => format!("{other:?}"),
+    };
+    let lookup_index =
+        |idx: usize, dyn_tbl: &[(String, String)]| -> Result<(String, String), String> {
+            if idx == 0 {
+                return Err("hpack index 0".to_string());
+            }
+            if idx <= HPACK_STATIC_TABLE.len() {
+                let (k, v) = HPACK_STATIC_TABLE[idx - 1];
+                return Ok((k.to_string(), v.to_string()));
+            }
+            let dyn_idx = idx - HPACK_STATIC_TABLE.len() - 1;
+            dyn_tbl
+                .get(dyn_idx)
+                .cloned()
+                .ok_or_else(|| "hpack dynamic index out of range".to_string())
+        };
+
+    while pos < buf.len() {
+        let b = buf[pos];
+        if (b & 0x80) != 0 {
+            let idx = decode_hpack_int(buf, &mut pos, 7).map_err(map_err)?;
+            let (name, value) = lookup_index(idx, dynamic_table)?;
+            out.push((name.to_ascii_lowercase(), value));
+        } else if (b & 0x40) != 0 {
+            let idx = decode_hpack_int(buf, &mut pos, 6).map_err(map_err)?;
+            let name = if idx == 0 {
+                decode_hpack_str(buf, &mut pos).map_err(map_err)?
+            } else {
+                lookup_index(idx, dynamic_table)?.0
+            };
+            let value = decode_hpack_str(buf, &mut pos).map_err(map_err)?;
+            let lower = name.to_ascii_lowercase();
+            dynamic_table.insert(0, (lower.clone(), value.clone()));
+            out.push((lower, value));
+        } else if (b & 0x20) != 0 {
+            let _max_size = decode_hpack_int(buf, &mut pos, 5).map_err(map_err)?;
+        } else {
+            let idx = decode_hpack_int(buf, &mut pos, 4).map_err(map_err)?;
+            let name = if idx == 0 {
+                decode_hpack_str(buf, &mut pos).map_err(map_err)?
+            } else {
+                lookup_index(idx, dynamic_table)?.0
+            };
+            let value = decode_hpack_str(buf, &mut pos).map_err(map_err)?;
+            out.push((name.to_ascii_lowercase(), value));
+        }
+    }
+    Ok(out)
 }
 
 fn encode_hpack_int(out: &mut Vec<u8>, prefix_byte: u8, prefix_bits: u8, mut val: usize) {

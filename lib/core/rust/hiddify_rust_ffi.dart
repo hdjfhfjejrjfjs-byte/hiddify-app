@@ -210,6 +210,9 @@ typedef _U64ToStrDart = ffi.Pointer<Utf8> Function(int);
 typedef _StrI32ToStrNative = ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>, ffi.Int32);
 typedef _StrI32ToStrDart = ffi.Pointer<Utf8> Function(ffi.Pointer<Utf8>, int);
 
+typedef _I64PairToStrNative = ffi.Pointer<Utf8> Function(ffi.Int64, ffi.Int64);
+typedef _I64PairToStrDart = ffi.Pointer<Utf8> Function(int, int);
+
 /// Cross-platform `dart:ffi` loader and bindings for `libhiddify_rust` across
 /// iOS (`XCFramework` static symbols), Android (`jniLibs`), macOS (`dylib`/`XCFramework`), and Linux (`bundle/lib`).
 class HiddifyRustNative {
@@ -226,7 +229,7 @@ class HiddifyRustNative {
       try {
         final lib = candidate();
         final b = _Bindings(lib);
-        if (b.abiVersion() == 6) {
+        if (b.abiVersion() == 7) {
           return b;
         }
       } catch (_) {
@@ -1674,6 +1677,149 @@ class HiddifyRustNative {
     if (raw == null) return null;
     return jsonDecode(raw) as Map<String, dynamic>;
   }
+
+  // --- Phase 7 (C-ABI v7): Ezytel Service, CoreProcess Supervisor & Crypto Tools ---
+
+  Map<String, dynamic>? ezytelInvoke(Map<String, dynamic> request) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _callStrToStr(b.ezytelInvokeJson, jsonEncode(request));
+    if (raw == null) return null;
+    return jsonDecode(raw) as Map<String, dynamic>;
+  }
+
+  String? coreProcessExecutablePath(String resolvedExecutable) {
+    final b = _bindings;
+    if (b == null) return null;
+    return _callStrToStr(b.coreProcessExecutablePath, resolvedExecutable);
+  }
+
+  ({String status, int handle, int pid, String certificatePem, String? message})? coreProcessStart({
+    required String executable,
+    required String baseDir,
+    required String workingDir,
+    required String tempDir,
+    required String listen,
+    required int mode,
+    required String modeName,
+    required String secret,
+    required bool debug,
+    required int ownerPid,
+    int readyTimeoutMs = 60000,
+    int stopTimeoutMs = 10000,
+  }) {
+    final b = _bindings;
+    if (b == null) return null;
+    final reqJson = jsonEncode({
+      'executable': executable,
+      'baseDir': baseDir,
+      'workingDir': workingDir,
+      'tempDir': tempDir,
+      'listen': listen,
+      'mode': mode,
+      'modeName': modeName,
+      'secret': secret,
+      'debug': debug,
+      'ownerPid': ownerPid,
+      'readyTimeoutMs': readyTimeoutMs,
+      'stopTimeoutMs': stopTimeoutMs,
+    });
+    final raw = _callStrToStr(b.coreProcessStartJson, reqJson);
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      status: map['status'] as String,
+      handle: (map['handle'] as num).toInt(),
+      pid: (map['pid'] as num).toInt(),
+      certificatePem: (map['certificatePem'] as String?) ?? '',
+      message: map['message'] as String?,
+    );
+  }
+
+  int? coreProcessWaitExit(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    final code = b.coreProcessWaitExit(handle);
+    return code == -2147483648 ? null : code;
+  }
+
+  bool? coreProcessIsStopping(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.coreProcessIsStopping(handle));
+  }
+
+  String? coreProcessCrashReason(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _readAndFree(b.coreProcessCrashReason(handle));
+  }
+
+  bool? coreProcessStop(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.coreProcessStop(handle));
+  }
+
+  bool? coreProcessForget(int handle) {
+    final b = _bindings;
+    if (b == null || handle == 0) return null;
+    return _toBool(b.coreProcessForget(handle));
+  }
+
+  String? windowsCrashReason(int pid, int exitCode) {
+    final b = _bindings;
+    if (b == null) return null;
+    return _readAndFree(b.windowsCrashReason(pid, exitCode));
+  }
+
+  ({bool ok, String? encrypted, String? error})? encryptHencConfig(String keyB64, String configStr) {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = using((arena) {
+      final kPtr = keyB64.toNativeUtf8(allocator: arena);
+      final cPtr = configStr.toNativeUtf8(allocator: arena);
+      return _readAndFree(b.encryptHencConfigJson(kPtr, cPtr));
+    });
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      ok: (map['ok'] as bool?) ?? false,
+      encrypted: map['encrypted'] as String?,
+      error: map['error'] as String?,
+    );
+  }
+
+  String? tryDecryptHencConfig(String keyB64, String valueStr) {
+    final b = _bindings;
+    if (b == null) return null;
+    return using((arena) {
+      final kPtr = keyB64.toNativeUtf8(allocator: arena);
+      final vPtr = valueStr.toNativeUtf8(allocator: arena);
+      return _readAndFree(b.tryDecryptHencConfig(kPtr, vPtr));
+    });
+  }
+
+  ({String certificatePem, String privateKeyPem})? generateLoopbackCertPair() {
+    final b = _bindings;
+    if (b == null) return null;
+    final raw = _readAndFree(b.generateLoopbackCertPairJson());
+    if (raw == null) return null;
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return (
+      certificatePem: map['certificatePem'] as String,
+      privateKeyPem: map['privateKeyPem'] as String,
+    );
+  }
+
+  bool? certHasLoopbackSan(String certPem) {
+    final b = _bindings;
+    if (b == null) return null;
+    return using((arena) {
+      final ptr = certPem.toNativeUtf8(allocator: arena);
+      return _toBool(b.certHasLoopbackSan(ptr));
+    });
+  }
 }
 
 class _Bindings {
@@ -2035,6 +2181,45 @@ class _Bindings {
       ),
       speedtestJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
         'hiddify_net_speedtest_json',
+      ),
+      ezytelInvokeJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_ezytel_invoke_json',
+      ),
+      coreProcessExecutablePath = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_core_process_executable_path',
+      ),
+      coreProcessStartJson = lib.lookupFunction<_StrToStrNative, _StrToStrDart>(
+        'hiddify_net_core_process_start_json',
+      ),
+      coreProcessWaitExit = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_core_process_wait_exit',
+      ),
+      coreProcessIsStopping = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_core_process_is_stopping',
+      ),
+      coreProcessCrashReason = lib.lookupFunction<_U64ToStrNative, _U64ToStrDart>(
+        'hiddify_net_core_process_crash_reason',
+      ),
+      coreProcessStop = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_core_process_stop',
+      ),
+      coreProcessForget = lib.lookupFunction<_U64ToBoolNative, _U64ToBoolDart>(
+        'hiddify_net_core_process_forget',
+      ),
+      windowsCrashReason = lib.lookupFunction<_I64PairToStrNative, _I64PairToStrDart>(
+        'hiddify_net_windows_crash_reason',
+      ),
+      encryptHencConfigJson = lib.lookupFunction<_Str2ToStrNative, _Str2ToStrDart>(
+        'hiddify_crypto_encrypt_henc_config_json',
+      ),
+      tryDecryptHencConfig = lib.lookupFunction<_Str2ToStrNative, _Str2ToStrDart>(
+        'hiddify_crypto_try_decrypt_henc_config',
+      ),
+      generateLoopbackCertPairJson = lib.lookupFunction<_NoArgStrNative, _NoArgStrDart>(
+        'hiddify_crypto_generate_loopback_cert_pair_json',
+      ),
+      certHasLoopbackSan = lib.lookupFunction<_StrToBoolNative, _StrToBoolDart>(
+        'hiddify_crypto_cert_has_loopback_san',
       );
 
   final _AbiVersionDart abiVersion;
@@ -2180,4 +2365,17 @@ class _Bindings {
   final _U64ToBoolDart appImageServiceIsRunning;
   final _U64ToBoolDart appImageServiceStop;
   final _StrToStrDart speedtestJson;
+  final _StrToStrDart ezytelInvokeJson;
+  final _StrToStrDart coreProcessExecutablePath;
+  final _StrToStrDart coreProcessStartJson;
+  final _U64ToBoolDart coreProcessWaitExit;
+  final _U64ToBoolDart coreProcessIsStopping;
+  final _U64ToStrDart coreProcessCrashReason;
+  final _U64ToBoolDart coreProcessStop;
+  final _U64ToBoolDart coreProcessForget;
+  final _I64PairToStrDart windowsCrashReason;
+  final _Str2ToStrDart encryptHencConfigJson;
+  final _Str2ToStrDart tryDecryptHencConfig;
+  final _NoArgStrDart generateLoopbackCertPairJson;
+  final _StrToBoolDart certHasLoopbackSan;
 }

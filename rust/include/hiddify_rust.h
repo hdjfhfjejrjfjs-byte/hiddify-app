@@ -267,6 +267,21 @@ int32_t hiddify_net_appimage_service_is_running(uint64_t handle);
 int32_t hiddify_net_appimage_service_stop(uint64_t handle);
 char *hiddify_net_speedtest_json(const char *request_json);
 
+/* Phase 7 (C-ABI v7): Ezytel Service, Desktop CoreProcess Supervisor & Crypto Tools */
+char *hiddify_net_ezytel_invoke_json(const char *request_json);
+char *hiddify_net_core_process_executable_path(const char *resolved_exe);
+char *hiddify_net_core_process_start_json(const char *request_json);
+int32_t hiddify_net_core_process_wait_exit(uint64_t handle);
+int32_t hiddify_net_core_process_is_stopping(uint64_t handle);
+char *hiddify_net_core_process_crash_reason(uint64_t handle);
+int32_t hiddify_net_core_process_stop(uint64_t handle);
+int32_t hiddify_net_core_process_forget(uint64_t handle);
+char *hiddify_net_windows_crash_reason(int64_t pid, int64_t exit_code);
+char *hiddify_crypto_encrypt_henc_config_json(const char *key_b64, const char *config_str);
+char *hiddify_crypto_try_decrypt_henc_config(const char *key_b64, const char *value_str);
+char *hiddify_crypto_generate_loopback_cert_pair_json(void);
+int32_t hiddify_crypto_cert_has_loopback_san(const char *cert_pem);
+
 #ifdef __cplusplus
 }
 #endif

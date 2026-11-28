@@ -471,6 +471,278 @@ pub fn generate_vless_encryption_pair() -> VlessEncryptionPair {
     generate_vless_encryption_from_seed(seed)
 }
 
+// ============================================================================
+// Phase 7: Build-Time `henc:` AES-256-GCM Config Encryptor & Loopback Certs
+// ============================================================================
+
+/// Plaintext prefix inside AES-256-GCM sealed build secrets (`hiddify-sing-box/hiddify/secret`).
+pub const HENC_MARKER: &[u8] = b"henc:";
+
+/// Decodes a Base64-encoded 32-byte AES-256 key (`secret.DecodeKey`).
+pub fn decode_henc_key(encoded_key: &str) -> Result<[u8; 32], String> {
+    let decoded = BASE64_STANDARD
+        .decode(encoded_key.trim().as_bytes())
+        .map_err(|e| format!("decode key: {e}"))?;
+    if decoded.len() != 32 {
+        return Err(format!(
+            "key must be 32 bytes (AES-256), got {}",
+            decoded.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(out)
+}
+
+/// Seals `"henc:" || plaintext` with AES-256-GCM and a fresh 12-byte CSPRNG nonce, returning
+/// `base64(nonce || ciphertext || tag)` (`secret.Encrypt`).
+pub fn encrypt_henc_bytes(encoded_key: &str, plaintext: &[u8]) -> Result<String, String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    let key = decode_henc_key(encoded_key)?;
+    let cipher = Aes256Gcm::new((&key).into());
+
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let mut prefixed = Vec::with_capacity(HENC_MARKER.len() + plaintext.len());
+    prefixed.extend_from_slice(HENC_MARKER);
+    prefixed.extend_from_slice(plaintext);
+
+    let ciphertext = cipher
+        .encrypt(nonce, prefixed.as_slice())
+        .map_err(|e| format!("aes-256-gcm encrypt failed: {e}"))?;
+
+    let mut sealed = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+    sealed.extend_from_slice(&nonce_bytes);
+    sealed.extend_from_slice(&ciphertext);
+    Ok(BASE64_STANDARD.encode(&sealed))
+}
+
+/// Validates and encrypts `PSIPHON_CONFIG` (raw JSON or Base64-encoded JSON) with `HIDDIFY_SECRET_KEY`,
+/// matching `hiddify-core/cmd/internal/encryptconfig/main.go:encrypt` verbatim.
+pub fn encrypt_henc_config(encoded_key: &str, config: &str) -> Result<String, String> {
+    let trimmed = config.trim().as_bytes();
+    let plaintext: Vec<u8> =
+        if serde_json::from_slice::<serde::de::IgnoredAny>(trimmed).is_ok() {
+            trimmed.to_vec()
+        } else {
+            let decoded = BASE64_STANDARD
+                .decode(trimmed)
+                .map_err(|e| format!("PSIPHON_CONFIG is neither JSON nor base64: {e}"))?;
+            if serde_json::from_slice::<serde::de::IgnoredAny>(&decoded).is_err() {
+                return Err("PSIPHON_CONFIG is not a valid JSON config".to_string());
+            }
+            decoded
+        };
+    encrypt_henc_bytes(encoded_key, &plaintext)
+}
+
+/// Decrypts a `henc:` Base64 value with `encoded_key`, returning `None` if not encrypted with this key
+/// (`secret.TryDecryptWithKey`).
+pub fn try_decrypt_henc_config(encoded_key: &str, value: &str) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    if encoded_key.trim().is_empty() {
+        return None;
+    }
+    let key = decode_henc_key(encoded_key).ok()?;
+    let sealed = BASE64_STANDARD.decode(value.trim().as_bytes()).ok()?;
+    if sealed.len() < 12 + 16 {
+        return None;
+    }
+    let cipher = Aes256Gcm::new((&key).into());
+    let nonce = Nonce::from_slice(&sealed[..12]);
+    let opened = cipher.decrypt(nonce, &sealed[12..]).ok()?;
+    opened.strip_prefix(HENC_MARKER).map(|rest| rest.to_vec())
+}
+
+/// Self-signed loopback certificate (`CERTIFICATE` PEM) and PKCS#1 RSA private key (`RSA PRIVATE KEY` PEM)
+/// matching `v2/hutils/cert.go:CertificatePair`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopbackCertPair {
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+}
+
+/// Generates a 2048-bit RSA self-signed CA/server/client certificate valid for `127.0.0.1`, `::1`,
+/// and `localhost` (`O=Hiddify, Inc., CN=127.0.0.1`, `NotBefore = now - 1h`, `NotAfter = now + 3650d`),
+/// matching `v2/hutils/cert.go:GenerateCertificatePair`.
+pub fn generate_loopback_certificate_pair() -> Result<LoopbackCertPair, CryptoError> {
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+
+    let mut rng = OsRng;
+    let private_key =
+        RsaPrivateKey::new(&mut rng, 2048).map_err(|e| CryptoError::KeyGen(e.to_string()))?;
+    let public_key = private_key.to_public_key();
+
+    let private_key_pem = private_key
+        .to_pkcs1_pem(LineEnding::LF)
+        .map_err(|e| CryptoError::Pkcs8Encode(e.to_string()))?
+        .to_string();
+
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let spki = SubjectPublicKeyInfoOwned::from_key(public_key)
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    let subject = Name::from_str("O=Hiddify\\, Inc.,CN=127.0.0.1")
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(1_700_000_000))
+        .as_secs();
+    let start_secs = now_secs.saturating_sub(3600);
+    let end_secs = now_secs.saturating_add(10 * 365 * 86_400);
+
+    let not_before = DerDateTime::from_unix_duration(Duration::from_secs(start_secs))
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+    let not_after = DerDateTime::from_unix_duration(Duration::from_secs(end_secs))
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+    let validity = Validity {
+        not_before: Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(not_before)),
+        not_after: Time::GeneralTime(der::asn1::GeneralizedTime::from_date_time(not_after)),
+    };
+
+    let mut serial_bytes = [0u8; 16];
+    rng.fill(&mut serial_bytes);
+    serial_bytes[0] &= 0x7F;
+    if serial_bytes.iter().all(|&b| b == 0) {
+        serial_bytes[15] = 1;
+    }
+    let serial =
+        SerialNumber::new(&serial_bytes).map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    let mut builder = CertificateBuilder::new(
+        Profile::Root,
+        serial,
+        validity,
+        subject,
+        spki,
+        &signing_key,
+    )
+    .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    builder
+        .add_extension(&ExtendedKeyUsage(vec![
+            OID_KP_SERVER_AUTH,
+            OID_KP_CLIENT_AUTH,
+        ]))
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    let ipv4_octets = OctetString::new(std::net::Ipv4Addr::LOCALHOST.octets().to_vec())
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+    let ipv6_octets = OctetString::new(std::net::Ipv6Addr::LOCALHOST.octets().to_vec())
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+    let dns_localhost = der::asn1::Ia5String::new("localhost")
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    builder
+        .add_extension(&SubjectAltName(vec![
+            GeneralName::IpAddress(ipv4_octets),
+            GeneralName::IpAddress(ipv6_octets),
+            GeneralName::DnsName(dns_localhost),
+        ]))
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    let cert = builder
+        .build()
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+    let certificate_pem = cert
+        .to_pem(LineEnding::LF)
+        .map_err(|e| CryptoError::CertBuild(e.to_string()))?;
+
+    Ok(LoopbackCertPair {
+        certificate_pem,
+        private_key_pem,
+    })
+}
+
+/// Reports whether `cert_pem` carries a loopback IP SAN (`127.0.0.0/8` or `::1`), `localhost` DNS SAN,
+/// or `CN=127.0.0.1` / `CN=localhost` (`v2/hutils/cert.go:CertificateHasLoopbackSAN`).
+pub fn certificate_has_loopback_san(cert_pem: &str) -> bool {
+    let Ok(der_bytes) = pem_to_der(cert_pem) else {
+        return false;
+    };
+    let Ok((_, cert)) = x509_parser::parse_x509_certificate(&der_bytes) else {
+        return false;
+    };
+
+    if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
+        for gn in &san_ext.value.general_names {
+            match gn {
+                x509_parser::extensions::GeneralName::IPAddress(raw) => match raw.len() {
+                    4 => {
+                        let ip = std::net::Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]);
+                        if ip.is_loopback() {
+                            return true;
+                        }
+                    }
+                    16 => {
+                        if let Ok(arr) = <[u8; 16]>::try_from(*raw) {
+                            let ip = std::net::Ipv6Addr::from(arr);
+                            if ip.is_loopback() {
+                                return true;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                x509_parser::extensions::GeneralName::DNSName(dns) => {
+                    if *dns == "localhost" {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for cn in cert.subject().iter_common_name() {
+        if let Ok(s) = cn.as_str() {
+            if s == "127.0.0.1" || s == "localhost" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Writes `cert_path` (`0o644`) and `key_path` (`0o600` on Unix), skipping when `skip_if_exist` is true
+/// and both files already exist (`v2/hutils/cert.go:GenerateCertificateFile`).
+pub fn generate_certificate_file(
+    cert_path: &Path,
+    key_path: &Path,
+    skip_if_exist: bool,
+) -> Result<(), CryptoError> {
+    if skip_if_exist && cert_path.exists() && key_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = cert_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    if let Some(parent) = key_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let pair = generate_loopback_certificate_pair()?;
+    fs::write(cert_path, pair.certificate_pem.as_bytes())?;
+    fs::write(key_path, pair.private_key_pem.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(cert_path, fs::Permissions::from_mode(0o644))?;
+        fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _assert_der_encode_trait<T: Encode>() {}
 
@@ -604,5 +876,56 @@ mod tests {
 
         let random_pair = generate_vless_encryption_pair();
         assert_ne!(random_pair.decryption, random_pair.encryption);
+    }
+
+    #[test]
+    fn henc_config_encryption_and_loopback_cert_match_go_rules() {
+        let mut raw_key = [0u8; 32];
+        OsRng.fill(&mut raw_key);
+        let key_b64 = BASE64_STANDARD.encode(raw_key);
+
+        let encrypted = encrypt_henc_config(&key_b64, r#"{"SponsorId":"X"}"#).expect("encrypt");
+        assert!(!encrypted.starts_with("henc:"));
+        let decrypted = try_decrypt_henc_config(&key_b64, &encrypted).expect("decrypt");
+        assert_eq!(decrypted, br#"{"SponsorId":"X"}"#);
+
+        let b64_json = BASE64_STANDARD.encode(br#"{"SponsorId":"Y"}"#);
+        let encrypted2 = encrypt_henc_config(&key_b64, &b64_json).expect("encrypt b64");
+        assert_ne!(encrypted, encrypted2);
+        assert_eq!(
+            try_decrypt_henc_config(&key_b64, &encrypted2).as_deref(),
+            Some(&br#"{"SponsorId":"Y"}"#[..])
+        );
+
+        assert!(try_decrypt_henc_config("", &encrypted).is_none());
+        assert!(try_decrypt_henc_config(&key_b64, &b64_json).is_none());
+        assert!(encrypt_henc_config(&key_b64, "not-json!").is_err());
+
+        let pair = generate_loopback_certificate_pair().expect("loopback pair");
+        assert!(pair.certificate_pem.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(pair
+            .private_key_pem
+            .contains("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(certificate_has_loopback_san(&pair.certificate_pem));
+
+        let non_loopback =
+            MtlsIdentity::generate_with_options("example.com", 365, true, &["example.com"])
+                .expect("example cert");
+        assert!(!certificate_has_loopback_san(&non_loopback.certificate_pem));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("data/cert/server-cert.pem");
+        let key_path = dir.path().join("data/cert/server-key.pem");
+        generate_certificate_file(&cert_path, &key_path, true).expect("gen cert file");
+        let first_cert = fs::read_to_string(&cert_path).unwrap();
+        // skip_if_exist = true keeps existing files untouched
+        generate_certificate_file(&cert_path, &key_path, true).expect("skip existing");
+        assert_eq!(fs::read_to_string(&cert_path).unwrap(), first_cert);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }

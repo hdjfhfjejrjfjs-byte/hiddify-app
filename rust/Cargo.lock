@@ -862,11 +862,14 @@ dependencies = [
 name = "hiddify-crypto"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "base64 0.22.1",
  "der",
  "rand",
  "rsa",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "spki",
  "tempfile",
@@ -917,6 +920,7 @@ dependencies = [
  "chacha20poly1305",
  "flate2",
  "hiddify-crypto",
+ "hiddify-diagnostics",
  "libc",
  "percent-encoding",
  "rand",

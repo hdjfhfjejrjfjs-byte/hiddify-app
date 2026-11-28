@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod admin_service;
 pub mod cancel;
+pub mod core_process;
+pub mod ezytel;
 pub mod fetch_url;
 pub mod health_check;
 pub mod lan_server;

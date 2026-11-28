@@ -287,4 +287,31 @@ class HiddifyRustNative {
   bool? appImageServiceIsRunning(int handle) => null;
   bool? appImageServiceStop(int handle) => null;
   Map<String, dynamic>? runSpeedtest(Map<String, dynamic> options) => null;
+
+  Map<String, dynamic>? ezytelInvoke(Map<String, dynamic> request) => null;
+  String? coreProcessExecutablePath(String resolvedExecutable) => null;
+  ({String status, int handle, int pid, String certificatePem, String? message})? coreProcessStart({
+    required String executable,
+    required String baseDir,
+    required String workingDir,
+    required String tempDir,
+    required String listen,
+    required int mode,
+    required String modeName,
+    required String secret,
+    required bool debug,
+    required int ownerPid,
+    int readyTimeoutMs = 60000,
+    int stopTimeoutMs = 10000,
+  }) => null;
+  int? coreProcessWaitExit(int handle) => null;
+  bool? coreProcessIsStopping(int handle) => null;
+  String? coreProcessCrashReason(int handle) => null;
+  bool? coreProcessStop(int handle) => null;
+  bool? coreProcessForget(int handle) => null;
+  String? windowsCrashReason(int pid, int exitCode) => null;
+  ({bool ok, String? encrypted, String? error})? encryptHencConfig(String keyB64, String configStr) => null;
+  String? tryDecryptHencConfig(String keyB64, String valueStr) => null;
+  ({String certificatePem, String privateKeyPem})? generateLoopbackCertPair() => null;
+  bool? certHasLoopbackSan(String certPem) => null;
 }
