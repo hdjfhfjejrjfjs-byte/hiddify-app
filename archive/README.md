@@ -1,9 +1,9 @@
 # Archived Legacy Dart Implementations
 
-本目录归档了 `hiddify-app` **一期（Phase 1）与二期（Phase 2）**中已经完整迁移到 Rust 原生模块（`rust/`）并与之重叠的旧版纯 Dart 实现（共 **31 个归档单元**）。
+本目录归档了 `hiddify-app` **一期（Phase 1）至四期（Phase 4）**中已经完整迁移到 Rust 原生模块（`rust/`）并与之重叠的旧版纯 Dart / gRPC 前台回退实现（共 **32 个归档单元**）。
 这些文件不参与 Flutter/Dart 编译与静态分析（已在 `analysis_options.yaml` 中排除），仅保留作历史对照与审计参考。
 
-> 所有线上/开发构建（iOS、Android、macOS、Linux）统一通过 `lib/core/rust/hiddify_rust.dart`（`dart:ffi`）直接调用 `libhiddify_rust` 动态库/Framework，不再维护双份重复实现。
+> 所有线上/开发构建（iOS、Android、macOS、Windows、Linux）统一通过 `lib/core/rust/hiddify_rust.dart`（`dart:ffi`）直接调用 `libhiddify_rust` 动态库/Framework，不再维护双份重复实现。
 
 ---
 
@@ -49,3 +49,11 @@
 | `hiddifycore/core_interface/core_process_crash_and_handshake_legacy.dart` | `lib/hiddifycore/core_interface/core_process.dart` | `rust/crates/hiddify-diagnostics` (`core_guard`) |
 | `hiddifycore/core_interface/windows_crash_legacy.dart` | `lib/hiddifycore/core_interface/windows_crash.dart` | `rust/crates/hiddify-diagnostics` (`core_guard`) |
 | `hiddifycore/grpc_and_start_errors_legacy.dart` | `lib/hiddifycore/grpc_errors.dart`<br/>`lib/hiddifycore/hiddify_core_service.dart`<br/>`lib/hiddifycore/core_interface/core_interface_desktop.dart` | `rust/crates/hiddify-diagnostics` (`core_guard`) + `hiddify-crypto` |
+
+---
+
+## 三期与四期归档清单（Phase 3 & Phase 4 · 1 项聚合单元）
+
+| 归档文件 (`archive/dart_legacy/...`) | 原 `lib/` 路径 | 迁移后的 Rust Crate & 模块 |
+|---|---|---|
+| `hiddifycore/core_diagnostics_and_admin_fg_legacy.dart` | `lib/features/crash_report/data/diagnostics_exporter.dart`<br/>`lib/features/crash_report/notifier/crash_report_notifier.dart`<br/>`lib/hiddifycore/hiddify_core_service.dart`<br/>`lib/hiddifycore/core_interface/core_interface_desktop_tun.dart` | `rust/crates/hiddify-diagnostics` (`report_export`) + `rust/crates/hiddify-net` (`fetch_url`, `admin_service`, `system_proxy`) |

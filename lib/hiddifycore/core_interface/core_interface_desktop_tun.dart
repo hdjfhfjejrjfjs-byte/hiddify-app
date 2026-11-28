@@ -138,34 +138,25 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
     required AdminPreference adminPreference,
     bool privilegeErrorRemembered = false,
   }) async {
-    if (hiddifyRust.isAvailable) {
-      final cliPath = _cliPath;
-      final res = await Isolate.run(
-        () => hiddifyRust.needAdminBgService(
+    final cliPath = _cliPath;
+    final res = await Isolate.run(
+      () => hiddifyRust.require(
+        hiddifyRust.needAdminBgService(
           serviceMode: serviceMode,
           hiddifySettingsJson: settingsJson,
           adminPreference: adminPreference.value,
           privilegeErrorRemembered: privilegeErrorRemembered,
           cliPath: cliPath,
         ),
-      );
-      if (res != null) {
-        return NeedAdminBgServiceResponse(
-          decision: AdminBgServiceDecision.valueOf(res.decision) ?? AdminBgServiceDecision.ADMIN_BG_SERVICE_NO,
-          adminNeededProxies: [
-            for (final p in res.adminNeededProxies)
-              AdminNeededProxy(tag: p.tag, summary: p.summary, detail: p.detail),
-          ],
-        );
-      }
-    }
-    return fgClient.needAdminBgService(
-      NeedAdminBgServiceRequest(
-        serviceMode: serviceMode,
-        hiddifySettingsJson: settingsJson,
-        adminPreference: adminPreference,
-        privilegeErrorRemembered: privilegeErrorRemembered,
+        'needAdminBgService',
       ),
+    );
+    return NeedAdminBgServiceResponse(
+      decision: AdminBgServiceDecision.valueOf(res.decision) ?? AdminBgServiceDecision.ADMIN_BG_SERVICE_NO,
+      adminNeededProxies: [
+        for (final p in res.adminNeededProxies)
+          AdminNeededProxy(tag: p.tag, summary: p.summary, detail: p.detail),
+      ],
     );
   }
 
@@ -274,10 +265,9 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
     final proxyOnly = !options.enableTun;
     final currentPid = pid;
 
-    Stream<EnsureAdminBgServiceEvent> eventStream;
-    if (hiddifyRust.isAvailable) {
-      final rawEvents = await Isolate.run(
-        () => hiddifyRust.ensureAdminBgService(
+    final rawEvents = await Isolate.run(
+      () => hiddifyRust.require(
+        hiddifyRust.ensureAdminBgService(
           configContent: snapshot.$1,
           configName: name,
           settingsJson: settingsStr,
@@ -288,48 +278,19 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
           ownerUser: ownerUser,
           proxyOnly: proxyOnly,
         ),
-      );
-      if (rawEvents != null) {
-        eventStream = Stream.fromIterable([
-          for (final e in rawEvents)
-            EnsureAdminBgServiceEvent(
-              progress:
-                  EnsureAdminBgServiceProgress.valueOf(e.progress) ??
-                  EnsureAdminBgServiceProgress.ENSURE_ADMIN_BG_FAILED_OTHER,
-              message: e.message,
-              servicePort: e.servicePort,
-            ),
-        ]);
-      } else {
-        eventStream = fgClient.ensureAdminBgService(
-          EnsureAdminBgServiceRequest(
-            configContent: snapshot.$1,
-            configName: name,
-            settingsJson: settingsStr,
-            resources: resources,
-            disableMemoryLimit: disableMemoryLimit,
-            ownerPid: currentPid,
-            cliPath: cliPath,
-            ownerUser: ownerUser,
-            proxyOnly: proxyOnly,
-          ),
-        );
-      }
-    } else {
-      eventStream = fgClient.ensureAdminBgService(
-        EnsureAdminBgServiceRequest(
-          configContent: snapshot.$1,
-          configName: name,
-          settingsJson: settingsStr,
-          resources: resources,
-          disableMemoryLimit: disableMemoryLimit,
-          ownerPid: currentPid,
-          cliPath: cliPath,
-          ownerUser: ownerUser,
-          proxyOnly: proxyOnly,
+        'ensureAdminBgService',
+      ),
+    );
+    final eventStream = Stream.fromIterable([
+      for (final e in rawEvents)
+        EnsureAdminBgServiceEvent(
+          progress:
+              EnsureAdminBgServiceProgress.valueOf(e.progress) ??
+              EnsureAdminBgServiceProgress.ENSURE_ADMIN_BG_FAILED_OTHER,
+          message: e.message,
+          servicePort: e.servicePort,
         ),
-      );
-    }
+    ]);
 
     EnsureAdminBgServiceProgress? last;
     String? lastMessage;
@@ -578,29 +539,21 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
     String address = '',
     bool supportSocks = false,
   }) async {
-    if (hiddifyRust.isAvailable) {
-      final workingDir = _workingDirectory?.path;
-      final res = await Isolate.run(
-        () => hiddifyRust.setSystemProxyEnabled(
+    final workingDir = _workingDirectory?.path;
+    final res = await Isolate.run(
+      () => hiddifyRust.require(
+        hiddifyRust.setSystemProxyEnabled(
           workingDir: workingDir,
           isEnabled: isEnabled,
           address: address,
           supportSocks: supportSocks,
         ),
-      );
-      if (res != null) {
-        return Response(
-          code: res.ok ? ResponseCode.OK : ResponseCode.FAILED,
-          message: res.message,
-        );
-      }
-    }
-    return fgClient.setSystemProxyEnabled(
-      SetSystemProxyEnabledRequest(
-        isEnabled: isEnabled,
-        address: address,
-        supportSocks: supportSocks,
+        'setSystemProxyEnabled',
       ),
+    );
+    return Response(
+      code: res.ok ? ResponseCode.OK : ResponseCode.FAILED,
+      message: res.message,
     );
   }
 
@@ -658,24 +611,10 @@ class CoreInterfaceDesktopTun extends CoreInterfaceDesktop {
   Future<bool> _isPrivileged() async {
     final cached = _privileged;
     if (cached != null) return cached;
-    final rustAdmin = hiddifyRust.isAdmin();
-    if (rustAdmin != null) {
-      loggy.debug('rust IsAdmin: $rustAdmin');
-      _privileged = rustAdmin;
-      return rustAdmin;
-    }
-    // The in-process core checks its own token (hutils.IsAdmin): no `id -u` or
-    // PowerShell child process, which antivirus heuristics score against a GUI app.
-    try {
-      final privileged = (await fgClient.isAdmin(Empty())).isAdmin;
-      loggy.debug('core IsAdmin: $privileged');
-      _privileged = privileged;
-      return privileged;
-    } catch (e) {
-      // Not cached: the core may simply not be up yet.
-      loggy.warning('core IsAdmin failed, assuming unprivileged: $e');
-      return false;
-    }
+    final rustAdmin = hiddifyRust.require(hiddifyRust.isAdmin(), 'isAdmin');
+    loggy.debug('rust IsAdmin: $rustAdmin');
+    _privileged = rustAdmin;
+    return rustAdmin;
   }
 
   Future<void> _runCli(List<String> args) async {

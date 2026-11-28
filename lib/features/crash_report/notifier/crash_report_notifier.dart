@@ -7,7 +7,6 @@ import 'package:hiddify/core/preferences/general_preferences.dart';
 import 'package:hiddify/core/router/dialog/dialog_notifier.dart';
 import 'package:hiddify/core/rust/hiddify_rust.dart';
 import 'package:hiddify/features/crash_report/data/crash_excerpt.dart';
-import 'package:hiddify/hiddifycore/generated/v2/hcommon/common.pb.dart';
 import 'package:hiddify/hiddifycore/generated/v2/hcore/hcore.pb.dart';
 import 'package:hiddify/hiddifycore/hiddify_core_service_provider.dart';
 import 'package:hiddify/utils/custom_loggers.dart';
@@ -32,9 +31,11 @@ class CrashReportNotifier extends Notifier<CrashReport?> {
   bool _checked = false;
   bool _offering = false;
 
-  List<CrashReport>? _readCoreCrashReportsViaRust(Directory workingDir) {
-    final list = hiddifyRust.listCoreCrashReports(workingDir.path);
-    if (list == null) return null;
+  List<CrashReport> _readCoreCrashReportsViaRust(Directory workingDir) {
+    final list = hiddifyRust.require(
+      hiddifyRust.listCoreCrashReports(workingDir.path),
+      'listCoreCrashReports',
+    );
     return [
       for (final r in list)
         CrashReport(
@@ -49,16 +50,7 @@ class CrashReportNotifier extends Notifier<CrashReport?> {
   Future<void> _checkAfterCrash() async {
     if (!ref.read(Preferences.introCompleted)) return;
     final workingDir = ref.read(appDirectoriesProvider).requireValue.workingDir;
-    if (_readCoreCrashReportsViaRust(workingDir) case final rustReports?) {
-      await _offer(rustReports);
-      return;
-    }
-    try {
-      final reports = await ref.read(hiddifyCoreServiceProvider).core.fgClient.listCrashReports(Empty());
-      await _offer(reports.reports);
-    } catch (e) {
-      _log.debug('crash reports not available after the crash: $e');
-    }
+    await _offer(_readCoreCrashReportsViaRust(workingDir));
   }
 
   /// Called once the first frame is up.
@@ -69,21 +61,8 @@ class CrashReportNotifier extends Notifier<CrashReport?> {
     final workingDir = ref.read(appDirectoriesProvider).requireValue.workingDir;
     await _dropStaleCrashes(workingDir);
     final app = appCrashReports(workingDir);
-    if (_readCoreCrashReportsViaRust(workingDir) case final rustReports?) {
-      await _offer([...rustReports, ...app]);
-      return;
-    }
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        final reports = await ref.read(hiddifyCoreServiceProvider).core.fgClient.listCrashReports(Empty());
-        await _offer([...reports.reports, ...app]);
-        return;
-      } catch (e) {
-        _log.debug('crash reports not available yet: $e');
-        await Future<void>.delayed(const Duration(seconds: 3));
-      }
-    }
-    await _offer(app);
+    final rustReports = _readCoreCrashReportsViaRust(workingDir);
+    await _offer([...rustReports, ...app]);
   }
 
   Future<void> _dropStaleCrashes(Directory workingDir) async {

@@ -79,34 +79,26 @@ class DiagnosticsExporter {
       }
     }
 
-    if (hiddifyRust.isAvailable) {
-      String? version;
-      try {
-        final info = await _ref.read(appInfoProvider.future);
-        version = info.version;
-      } catch (_) {}
+    String? version;
+    try {
+      final info = await _ref.read(appInfoProvider.future);
+      version = info.version;
+    } catch (_) {}
 
-      final outcome = hiddifyRust.require(
-        hiddifyRust.exportDiagnosticsReport(
-          workingDir: workingDir,
-          tempDir: tempDir,
-          unencrypted: unencrypted,
-          publicKey: _diagnosticsPublicKey.isEmpty ? null : _diagnosticsPublicKey,
-          extraFiles: extraFiles,
-          genericFiles: genericFiles,
-          coreVersion: version,
-          coreState: coreService.currentState.runtimeType.toString(),
-        ),
-        'exportDiagnosticsReport',
-      );
-      _log.info('diagnostics written via rust to ${outcome.path}, encrypted: ${outcome.encrypted}');
-      return (file: File(outcome.path), encrypted: outcome.encrypted);
-    }
-
-    final response = await core.fgClient.exportDiagnostics(
-      ExportDiagnosticsRequest(extraFiles: extraFiles, genericFiles: genericFiles, unencrypted: unencrypted),
+    final outcome = hiddifyRust.require(
+      hiddifyRust.exportDiagnosticsReport(
+        workingDir: workingDir,
+        tempDir: tempDir,
+        unencrypted: unencrypted,
+        publicKey: _diagnosticsPublicKey.isEmpty ? null : _diagnosticsPublicKey,
+        extraFiles: extraFiles,
+        genericFiles: genericFiles,
+        coreVersion: version,
+        coreState: coreService.currentState.runtimeType.toString(),
+      ),
+      'exportDiagnosticsReport',
     );
-    _log.info('diagnostics written to ${response.path}, encrypted: ${response.encrypted}');
-    return (file: File(response.path), encrypted: response.encrypted);
+    _log.info('diagnostics written via rust to ${outcome.path}, encrypted: ${outcome.encrypted}');
+    return (file: File(outcome.path), encrypted: outcome.encrypted);
   }
 }

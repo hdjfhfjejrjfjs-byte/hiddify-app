@@ -85,55 +85,45 @@ class HiddifyCoreService with InfraLogger {
     });
   }
 
-  /// Downloads [url] in the core, with the TLS handshake of Chrome; cancel the returned call to
-  /// stop it. A status other than 2xx is a response, not an error.
-  ResponseFuture<FetchUrlResponse> fetchUrl(String url, {required String userAgent, required Duration timeout}) =>
-      core.fgClient.fetchUrl(FetchUrlRequest(url: url, userAgent: userAgent, timeoutMs: timeout.inMilliseconds));
-
-  /// Downloads [url] via `libhiddify_rust` (`hiddify_net::fetch_url`) in a background Isolate when
-  /// available, falling back to `fgClient.fetchUrl`.
+  /// Downloads [url] via `libhiddify_rust` (`hiddify_net::fetch_url`) in a background Isolate,
+  /// using Chrome-like TLS and bundled Mozilla + system roots. A status other than 2xx is a
+  /// response, not an error.
   Future<FetchUrlResponse> fetchUrlAsync(
     String url, {
     required String userAgent,
     required Duration timeout,
     Future<void>? cancel,
   }) async {
-    if (hiddifyRust.isAvailable) {
-      final timeoutMs = timeout.inMilliseconds;
-      final rustFuture = Isolate.run(
-        () => hiddifyRust.fetchUrl(url: url, userAgent: userAgent, timeoutMs: timeoutMs),
-      );
-      final outcome = cancel == null
-          ? await rustFuture
-          : await Future.any<
-              ({
-                int statusCode,
-                List<({String name, String value})> headers,
-                Uint8List body,
-                int error,
-                String errorDetail,
-              })?
-            >([
-              rustFuture,
-              cancel.then((_) => throw const GrpcError.cancelled('cancelled')),
-            ]);
-      if (outcome != null) {
-        return FetchUrlResponse(
-          statusCode: outcome.statusCode,
-          headers: [
-            for (final h in outcome.headers) HttpHeader(name: h.name, value: h.value),
-          ],
-          body: outcome.body,
-          error: FetchUrlError.valueOf(outcome.error) ?? FetchUrlError.FETCH_URL_ERROR_OTHER,
-          errorDetail: outcome.errorDetail,
-        );
-      }
-    }
-    final call = fetchUrl(url, userAgent: userAgent, timeout: timeout);
-    if (cancel != null) {
-      unawaited(cancel.then((_) => call.cancel()));
-    }
-    return call;
+    final timeoutMs = timeout.inMilliseconds;
+    final rustFuture = Isolate.run(
+      () => hiddifyRust.require(
+        hiddifyRust.fetchUrl(url: url, userAgent: userAgent, timeoutMs: timeoutMs),
+        'fetchUrl',
+      ),
+    );
+    final outcome = cancel == null
+        ? await rustFuture
+        : await Future.any<
+            ({
+              int statusCode,
+              List<({String name, String value})> headers,
+              Uint8List body,
+              int error,
+              String errorDetail,
+            })
+          >([
+            rustFuture,
+            cancel.then((_) => throw const GrpcError.cancelled('cancelled')),
+          ]);
+    return FetchUrlResponse(
+      statusCode: outcome.statusCode,
+      headers: [
+        for (final h in outcome.headers) HttpHeader(name: h.name, value: h.value),
+      ],
+      body: outcome.body,
+      error: FetchUrlError.valueOf(outcome.error) ?? FetchUrlError.FETCH_URL_ERROR_OTHER,
+      errorDetail: outcome.errorDetail,
+    );
   }
 
   TaskEither<String, String> generateFullConfigByPath(String path) {
